@@ -1,4 +1,4 @@
-module github.com/user/kubewatch-tui
+module github.com/HamStudy/kubewatch
 
 go 1.23.0
 

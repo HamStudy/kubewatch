@@ -301,14 +301,24 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.helpView = helpModel.(*views.HelpView)
 		cmds = append(cmds, cmd)
 	} else if a.state.ShowLogs {
-		// Split view: resources on top, logs on bottom
-		resourceModel, cmd := a.resourceView.Update(msg)
-		a.resourceView = resourceModel.(*views.ResourceView)
-		cmds = append(cmds, cmd)
+		// Split view: only pass keyboard events to the log view
+		// Resource view only gets non-keyboard messages (like refresh ticks)
+		switch msg.(type) {
+		case tea.KeyMsg:
+			// Keyboard events go only to log view
+			logModel, cmd := a.logView.Update(msg)
+			a.logView = logModel.(*views.LogView)
+			cmds = append(cmds, cmd)
+		default:
+			// Non-keyboard events go to both views
+			resourceModel, cmd := a.resourceView.Update(msg)
+			a.resourceView = resourceModel.(*views.ResourceView)
+			cmds = append(cmds, cmd)
 
-		logModel, cmd := a.logView.Update(msg)
-		a.logView = logModel.(*views.LogView)
-		cmds = append(cmds, cmd)
+			logModel, cmd := a.logView.Update(msg)
+			a.logView = logModel.(*views.LogView)
+			cmds = append(cmds, cmd)
+		}
 	} else {
 		// Full resource view
 		resourceModel, cmd := a.resourceView.Update(msg)

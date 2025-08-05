@@ -27,13 +27,13 @@ A fast, interactive terminal-based Kubernetes dashboard built with Go and Bubble
 
 ### Using Go Install
 ```bash
-go install github.com/yourusername/kubewatch-tui/cmd/kubewatch@latest
+go install github.com/HamStudy/kubewatch/cmd/kubewatch@latest
 ```
 
 ### Building from Source
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/kubewatch-tui.git
+git clone https://github.com/HamStudy/kubewatch.git
 cd kubewatch-tui/golang-implementation
 
 # Build
