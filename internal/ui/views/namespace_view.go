@@ -1,0 +1,257 @@
+package views
+
+import (
+	"fmt"
+	"strings"
+
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
+	v1 "k8s.io/api/core/v1"
+)
+
+// NamespaceView displays a list of namespaces for selection
+type NamespaceView struct {
+	namespaces       []v1.Namespace
+	filteredItems    []v1.Namespace
+	selectedIndex    int
+	filter           string
+	width            int
+	height           int
+	currentNamespace string
+}
+
+// NewNamespaceView creates a new namespace selector view
+func NewNamespaceView(namespaces []v1.Namespace, currentNamespace string) *NamespaceView {
+	nv := &NamespaceView{
+		namespaces:       namespaces,
+		filteredItems:    namespaces,
+		currentNamespace: currentNamespace,
+	}
+
+	// Pre-select the current namespace
+	for i, ns := range namespaces {
+		if ns.Name == currentNamespace {
+			nv.selectedIndex = i
+			break
+		}
+	}
+
+	// Add "all" option at the beginning
+	allNs := v1.Namespace{}
+	allNs.Name = "all"
+	nv.namespaces = append([]v1.Namespace{allNs}, namespaces...)
+	nv.filteredItems = nv.namespaces
+
+	// Adjust selection if current namespace is "all" or empty
+	if currentNamespace == "" || currentNamespace == "all" {
+		nv.selectedIndex = 0
+	} else {
+		nv.selectedIndex++ // Adjust for the "all" option we added
+	}
+
+	return nv
+}
+
+// Init initializes the view
+func (v *NamespaceView) Init() tea.Cmd {
+	return nil
+}
+
+// Update handles messages
+func (v *NamespaceView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.KeyMsg:
+		switch msg.String() {
+		case "up", "k":
+			if v.selectedIndex > 0 {
+				v.selectedIndex--
+			}
+		case "down", "j":
+			if v.selectedIndex < len(v.filteredItems)-1 {
+				v.selectedIndex++
+			}
+		case "home":
+			v.selectedIndex = 0
+		case "end":
+			v.selectedIndex = len(v.filteredItems) - 1
+		case "pgup":
+			v.selectedIndex -= 10
+			if v.selectedIndex < 0 {
+				v.selectedIndex = 0
+			}
+		case "pgdown":
+			v.selectedIndex += 10
+			if v.selectedIndex >= len(v.filteredItems) {
+				v.selectedIndex = len(v.filteredItems) - 1
+			}
+		case "/":
+			// Start filtering
+			v.filter = ""
+		case "backspace":
+			if len(v.filter) > 0 {
+				v.filter = v.filter[:len(v.filter)-1]
+				v.applyFilter()
+			}
+		case "esc":
+			// Clear filter
+			v.filter = ""
+			v.applyFilter()
+		case "enter":
+			// Selection made - will be handled by parent
+			return v, nil
+		case "q", "n":
+			// Cancel - will be handled by parent
+			return v, nil
+		default:
+			// Add to filter if it's a printable character
+			if len(msg.String()) == 1 && msg.String()[0] >= 32 && msg.String()[0] < 127 {
+				v.filter += msg.String()
+				v.applyFilter()
+			}
+		}
+	}
+	return v, nil
+}
+
+// View renders the namespace selector
+func (v *NamespaceView) View() string {
+	// Create styles
+	titleStyle := lipgloss.NewStyle().
+		Bold(true).
+		Foreground(lipgloss.Color("86")).
+		MarginBottom(1)
+
+	borderStyle := lipgloss.NewStyle().
+		BorderStyle(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color("62")).
+		Padding(1, 2).
+		Width(50).
+		Height(20)
+
+	selectedStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("229")).
+		Background(lipgloss.Color("57")).
+		Bold(true)
+
+	currentStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("2")).
+		Bold(true)
+
+	filterStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("3")).
+		Italic(true)
+
+	// Build content
+	var content strings.Builder
+
+	title := "Select Namespace"
+	content.WriteString(titleStyle.Render(title))
+	content.WriteString("\n\n")
+
+	// Show filter if active
+	if v.filter != "" {
+		content.WriteString(filterStyle.Render(fmt.Sprintf("Filter: %s", v.filter)))
+		content.WriteString("\n\n")
+	}
+
+	// Calculate visible range (show 15 items)
+	visibleItems := 15
+	startIdx := 0
+	endIdx := len(v.filteredItems)
+
+	// Adjust viewport to keep selection visible
+	if v.selectedIndex >= visibleItems {
+		startIdx = v.selectedIndex - visibleItems/2
+		if startIdx < 0 {
+			startIdx = 0
+		}
+	}
+
+	if endIdx > startIdx+visibleItems {
+		endIdx = startIdx + visibleItems
+	}
+
+	// List namespaces
+	for i := startIdx; i < endIdx && i < len(v.filteredItems); i++ {
+		ns := v.filteredItems[i]
+		line := ns.Name
+
+		// Add status for special namespaces
+		if ns.Name == "all" {
+			line = "📁 All Namespaces"
+		} else if ns.Name == v.currentNamespace {
+			line = fmt.Sprintf("• %s", line)
+		} else {
+			line = fmt.Sprintf("  %s", line)
+		}
+
+		// Apply styling
+		if i == v.selectedIndex {
+			line = selectedStyle.Render(fmt.Sprintf("→ %s", line))
+		} else if ns.Name == v.currentNamespace && ns.Name != "all" {
+			line = currentStyle.Render(line)
+		}
+
+		content.WriteString(line)
+		content.WriteString("\n")
+	}
+
+	// Add scroll indicator if needed
+	if len(v.filteredItems) > visibleItems {
+		scrollInfo := fmt.Sprintf("\n[%d-%d of %d]", startIdx+1, endIdx, len(v.filteredItems))
+		content.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Render(scrollInfo))
+	}
+
+	// Add help text
+	helpText := "\n\n[↑↓/jk] Navigate  [/] Filter  [Enter] Select  [Esc/q/n] Cancel"
+	content.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Render(helpText))
+
+	// Center the popup
+	return lipgloss.Place(
+		v.width,
+		v.height,
+		lipgloss.Center,
+		lipgloss.Center,
+		borderStyle.Render(content.String()),
+	)
+}
+
+// SetSize updates the view size
+func (v *NamespaceView) SetSize(width, height int) {
+	v.width = width
+	v.height = height
+}
+
+// GetSelectedNamespace returns the selected namespace name
+func (v *NamespaceView) GetSelectedNamespace() string {
+	if v.selectedIndex >= 0 && v.selectedIndex < len(v.filteredItems) {
+		ns := v.filteredItems[v.selectedIndex]
+		if ns.Name == "all" {
+			return "" // Empty string means all namespaces
+		}
+		return ns.Name
+	}
+	return v.currentNamespace
+}
+
+// applyFilter filters the namespace list based on the current filter string
+func (v *NamespaceView) applyFilter() {
+	if v.filter == "" {
+		v.filteredItems = v.namespaces
+		return
+	}
+
+	v.filteredItems = []v1.Namespace{}
+	filterLower := strings.ToLower(v.filter)
+
+	for _, ns := range v.namespaces {
+		if strings.Contains(strings.ToLower(ns.Name), filterLower) {
+			v.filteredItems = append(v.filteredItems, ns)
+		}
+	}
+
+	// Reset selection to first item if current selection is out of bounds
+	if v.selectedIndex >= len(v.filteredItems) {
+		v.selectedIndex = 0
+	}
+}
