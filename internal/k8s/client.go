@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	v1 "k8s.io/api/core/v1"
@@ -17,7 +18,6 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
-	"k8s.io/client-go/util/homedir"
 	metricsclient "k8s.io/metrics/pkg/client/clientset/versioned"
 )
 
@@ -86,7 +86,7 @@ func NewClient(kubeconfig string) (*Client, error) {
 			}
 		} else {
 			// Use default kubeconfig location if KUBECONFIG is not set
-			if home := homedir.HomeDir(); home != "" {
+			if home, err := os.UserHomeDir(); err == nil && home != "" {
 				defaultPath := filepath.Join(home, ".kube", "config")
 				if _, err := os.Stat(defaultPath); err == nil {
 					loadingRules.Precedence = []string{defaultPath}
@@ -153,7 +153,7 @@ func NewClientWithOptions(kubeconfig string, opts *ClientOptions) (*Client, erro
 			}
 		} else {
 			// Use default kubeconfig location if KUBECONFIG is not set
-			if home := homedir.HomeDir(); home != "" {
+			if home, err := os.UserHomeDir(); err == nil && home != "" {
 				defaultPath := filepath.Join(home, ".kube", "config")
 				if _, err := os.Stat(defaultPath); err == nil {
 					loadingRules.Precedence = []string{defaultPath}
@@ -298,6 +298,7 @@ func (c *Client) DeletePods(ctx context.Context, namespace string, names []strin
 }
 
 // GetPodLogs returns logs for a pod
+// GetPodLogs returns a stream of pod logs
 func (c *Client) GetPodLogs(ctx context.Context, namespace, pod, container string, follow bool, tailLines int64) (io.ReadCloser, error) {
 	opts := &v1.PodLogOptions{
 		Follow:    follow,
@@ -305,6 +306,25 @@ func (c *Client) GetPodLogs(ctx context.Context, namespace, pod, container strin
 	}
 	if container != "" {
 		opts.Container = container
+	}
+
+	req := c.clientset.CoreV1().Pods(namespace).GetLogs(pod, opts)
+	return req.Stream(ctx)
+}
+
+// GetPodLogsWithOptions returns a stream of pod logs with more options
+func (c *Client) GetPodLogsWithOptions(ctx context.Context, namespace, pod, container string, follow bool, tailLines int64, previous bool, sinceTime *time.Time, timestamps bool) (io.ReadCloser, error) {
+	opts := &v1.PodLogOptions{
+		Follow:     follow,
+		TailLines:  &tailLines,
+		Previous:   previous,
+		Timestamps: timestamps,
+	}
+	if container != "" {
+		opts.Container = container
+	}
+	if sinceTime != nil {
+		opts.SinceTime = &metav1.Time{Time: *sinceTime}
 	}
 
 	req := c.clientset.CoreV1().Pods(namespace).GetLogs(pod, opts)

@@ -1,4 +1,4 @@
-# Makefile for kubewatch-tui
+# Makefile for kubewatch
 
 # Variables
 BINARY_NAME=kubewatch

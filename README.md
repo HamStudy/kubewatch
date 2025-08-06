@@ -34,7 +34,7 @@ go install github.com/HamStudy/kubewatch/cmd/kubewatch@latest
 ```bash
 # Clone the repository
 git clone https://github.com/HamStudy/kubewatch.git
-cd kubewatch-tui/golang-implementation
+cd kubewatch
 
 # Build
 make build

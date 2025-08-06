@@ -6,12 +6,12 @@ import (
 	"strings"
 	"time"
 
+	"github.com/HamStudy/kubewatch/internal/core"
+	"github.com/HamStudy/kubewatch/internal/k8s"
+	"github.com/HamStudy/kubewatch/internal/ui/views"
 	"github.com/charmbracelet/bubbles/key"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
-	"github.com/user/kubewatch-tui/internal/core"
-	"github.com/user/kubewatch-tui/internal/k8s"
-	"github.com/user/kubewatch-tui/internal/ui/views"
 	"k8s.io/apimachinery/pkg/watch"
 )
 
@@ -164,7 +164,33 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		)
 
 	case tea.KeyMsg:
-		// Handle delete confirmation first
+		// ESC key has highest priority - always go back/cancel
+		if msg.String() == "esc" {
+			// Close any open dialog or view
+			if a.showDeleteConfirm {
+				a.showDeleteConfirm = false
+				a.pendingDeleteName = ""
+				return a, nil
+			}
+			if a.showNamespacePopup {
+				a.showNamespacePopup = false
+				return a, nil
+			}
+			if a.state.ShowHelp {
+				a.state.ShowHelp = false
+				return a, nil
+			}
+			if a.state.ShowLogs {
+				a.state.ShowLogs = false
+				a.resourceView.SetCompactMode(false)
+				a.resourceView.SetSize(a.width, a.height) // Reset to full size
+				return a, a.logView.StopStreaming()
+			}
+			// If nothing is open, ESC does nothing (don't quit)
+			return a, nil
+		}
+
+		// Handle delete confirmation
 		if a.showDeleteConfirm {
 			switch msg.String() {
 			case "enter", " ":
@@ -178,7 +204,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				a.showDeleteConfirm = false
 				a.pendingDeleteName = ""
 				return a, nil
-			case "esc", "q":
+			case "q":
 				// Cancel deletion
 				a.showDeleteConfirm = false
 				a.pendingDeleteName = ""
@@ -206,7 +232,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				a.showNamespacePopup = false
 				return a, nil
-			case "esc", "q", "n":
+			case "q", "n":
 				// Cancel namespace selection
 				a.showNamespacePopup = false
 				return a, nil
@@ -218,60 +244,87 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
-		switch {
-		case key.Matches(msg, a.keys.Quit):
-			return a, tea.Quit
+		// When logs are showing AND in search mode, skip ALL app-level key handling
+		if a.state.ShowLogs && a.logView.IsSearchMode() {
+			// Only let ESC work to cancel search
+			if msg.String() == "esc" {
+				// This will be handled by the log view to cancel search
+			}
+			// Skip all other app-level key processing when in search mode
+		} else if a.state.ShowLogs {
+			// When logs are showing but NOT in search mode
+			switch {
+			case key.Matches(msg, a.keys.Quit):
+				return a, tea.Quit
+			case key.Matches(msg, a.keys.Help):
+				a.state.ShowHelp = !a.state.ShowHelp
+				a.helpView.SetContext("logs")
+				return a, nil
+				// All other keys go to the log view (handled below)
+			}
+		} else { // Normal resource view key handling
+			switch {
+			case key.Matches(msg, a.keys.Quit):
+				return a, tea.Quit
 
-		case key.Matches(msg, a.keys.Help):
-			a.state.ShowHelp = !a.state.ShowHelp
-			return a, nil
+			case key.Matches(msg, a.keys.Help):
+				a.state.ShowHelp = !a.state.ShowHelp
+				a.helpView.SetContext("resource")
+				return a, nil
 
-		case msg.String() == "n":
-			// Open namespace selector
-			return a, a.openNamespaceSelector()
+			case msg.String() == "n":
+				// Open namespace selector (only when logs not showing)
+				return a, a.openNamespaceSelector()
 
-		case key.Matches(msg, a.keys.Tab):
-			a.nextResourceType()
-			return a, a.resourceView.RefreshResources()
+			case key.Matches(msg, a.keys.Tab):
+				// Switch resource types (only when logs not showing)
+				a.nextResourceType()
+				return a, a.resourceView.RefreshResources()
 
-		case key.Matches(msg, a.keys.ShiftTab):
-			a.prevResourceType()
-			return a, a.resourceView.RefreshResources()
+			case key.Matches(msg, a.keys.ShiftTab):
+				// Switch resource types (only when logs not showing)
+				a.prevResourceType()
+				return a, a.resourceView.RefreshResources()
 
-		case key.Matches(msg, a.keys.Logs):
-			if !a.state.ShowLogs {
+			case key.Matches(msg, a.keys.Logs):
+				// Toggle log view
+				if !a.state.ShowLogs {
+					selectedName := a.resourceView.GetSelectedResourceName()
+					if selectedName != "" {
+						a.state.ShowLogs = true
+						a.resourceView.SetCompactMode(true)
+						return a, a.logView.StartStreaming(a.ctx, a.k8sClient, a.state, selectedName)
+					}
+				} else {
+					a.state.ShowLogs = false
+					a.resourceView.SetCompactMode(false)
+					a.resourceView.SetSize(a.width, a.height) // Reset to full size
+					return a, a.logView.StopStreaming()
+				}
+
+			case key.Matches(msg, a.keys.Delete):
+				// Show delete confirmation (only when logs not showing)
 				selectedName := a.resourceView.GetSelectedResourceName()
 				if selectedName != "" {
-					a.state.ShowLogs = true
-					return a, a.logView.StartStreaming(a.ctx, a.k8sClient, a.state, selectedName)
+					a.pendingDeleteName = selectedName
+					resourceType := string(a.state.CurrentResourceType)
+					// Remove the 's' at the end for singular form
+					if strings.HasSuffix(resourceType, "s") {
+						resourceType = resourceType[:len(resourceType)-1]
+					}
+					message := fmt.Sprintf("Are you sure you want to delete %s '%s'?",
+						strings.ToLower(resourceType), selectedName)
+					a.confirmView = views.NewConfirmView("⚠️  Confirm Deletion", message)
+					a.confirmView.SetSize(a.width, a.height)
+					a.confirmView.SetConfirmText("Delete")
+					a.confirmView.SetCancelText("Cancel")
+					a.showDeleteConfirm = true
+					return a, nil
 				}
-			} else {
-				a.state.ShowLogs = false
-				return a, a.logView.StopStreaming()
-			}
 
-		case key.Matches(msg, a.keys.Delete):
-			// Show delete confirmation
-			selectedName := a.resourceView.GetSelectedResourceName()
-			if selectedName != "" {
-				a.pendingDeleteName = selectedName
-				resourceType := string(a.state.CurrentResourceType)
-				// Remove the 's' at the end for singular form
-				if strings.HasSuffix(resourceType, "s") {
-					resourceType = resourceType[:len(resourceType)-1]
-				}
-				message := fmt.Sprintf("Are you sure you want to delete %s '%s'?",
-					strings.ToLower(resourceType), selectedName)
-				a.confirmView = views.NewConfirmView("⚠️  Confirm Deletion", message)
-				a.confirmView.SetSize(a.width, a.height)
-				a.confirmView.SetConfirmText("Delete")
-				a.confirmView.SetCancelText("Cancel")
-				a.showDeleteConfirm = true
-				return a, nil
+			case key.Matches(msg, a.keys.Refresh):
+				return a, a.resourceView.RefreshResources()
 			}
-
-		case key.Matches(msg, a.keys.Refresh):
-			return a, a.resourceView.RefreshResources()
 		}
 
 	case tea.WindowSizeMsg:
@@ -350,12 +403,27 @@ func (a *App) View() string {
 	}
 
 	if a.state.ShowLogs {
-		// Split view
-		resourceHeight := a.height / 2
+		// Split view - give more space to logs, keep resource view compact
+		minResourceHeight := 8 // Minimum height for resource view (header + 5-6 rows)
+		resourceHeight := minResourceHeight
+
+		// If we have more space, show a bit more context
+		if a.height > 20 {
+			resourceHeight = a.height / 3 // Give 1/3 to resources, 2/3 to logs
+			if resourceHeight < minResourceHeight {
+				resourceHeight = minResourceHeight
+			}
+		}
+
 		logHeight := a.height - resourceHeight - 1
+
+		// Update sizes for both views
+		a.resourceView.SetSize(a.width, resourceHeight)
+		a.logView.SetSize(a.width, logHeight)
 
 		topView := lipgloss.NewStyle().
 			Height(resourceHeight).
+			MaxHeight(resourceHeight).
 			Render(a.resourceView.View())
 
 		bottomView := lipgloss.NewStyle().

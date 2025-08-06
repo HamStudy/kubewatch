@@ -1,0 +1,23 @@
+#!/bin/bash
+
+# Test script to verify log tailing functionality
+echo "Testing Kubewatch TUI Log Tailing"
+echo "================================="
+echo ""
+echo "Instructions:"
+echo "1. Run ./kubewatch"
+echo "2. Navigate to a Pod or Deployment"
+echo "3. Press 'l' or Enter to view logs"
+echo "4. You should see:"
+echo "   - Last 100 lines of scrollback immediately"
+echo "   - New logs appearing in real-time"
+echo "   - Status showing FOLLOWING or PAUSED"
+echo "   - Press 'f' to toggle follow mode"
+echo "   - Scroll up to automatically pause following"
+echo "   - Press 'G' or End to resume following"
+echo ""
+echo "To generate test logs in a pod:"
+echo "kubectl run test-logger --image=busybox --restart=Never -- sh -c 'i=0; while true; do echo \"Log line \$i at \$(date)\"; i=\$((i+1)); sleep 2; done'"
+echo ""
+echo "To clean up test pod:"
+echo "kubectl delete pod test-logger"

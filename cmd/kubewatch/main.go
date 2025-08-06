@@ -11,10 +11,10 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/HamStudy/kubewatch/internal/core"
+	"github.com/HamStudy/kubewatch/internal/k8s"
+	"github.com/HamStudy/kubewatch/internal/ui"
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/user/kubewatch-tui/internal/core"
-	"github.com/user/kubewatch-tui/internal/k8s"
-	"github.com/user/kubewatch-tui/internal/ui"
 )
 
 var (

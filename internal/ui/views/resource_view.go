@@ -7,10 +7,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/HamStudy/kubewatch/internal/core"
+	"github.com/HamStudy/kubewatch/internal/k8s"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
-	"github.com/user/kubewatch-tui/internal/core"
-	"github.com/user/kubewatch-tui/internal/k8s"
 	appsv1 "k8s.io/api/apps/v1"
 	v1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
@@ -27,6 +27,7 @@ type ResourceView struct {
 	podMetrics       map[string]*k8s.PodMetrics
 	horizontalOffset int
 	lastRefresh      time.Time
+	compactMode      bool // For split view with logs
 
 	// Custom table data
 	headers        []string
@@ -131,7 +132,59 @@ func (v *ResourceView) View() string {
 func (v *ResourceView) SetSize(width, height int) {
 	v.width = width
 	v.height = height
-	v.viewportHeight = height - 6 // Account for header and borders
+	if v.compactMode {
+		// In compact mode, ensure selected item stays visible with minimal context
+		v.viewportHeight = height - 3 // Less space for header in compact mode
+	} else {
+		v.viewportHeight = height - 6 // Account for header and borders
+	}
+}
+
+// SetCompactMode enables/disables compact mode for split view
+func (v *ResourceView) SetCompactMode(compact bool) {
+	v.compactMode = compact
+	if compact {
+		// Adjust viewport to keep selected item visible
+		v.ensureSelectedVisible()
+	}
+}
+
+// ensureSelectedVisible adjusts viewport to keep selected item in view
+func (v *ResourceView) ensureSelectedVisible() {
+	// First ensure selectedRow is within bounds
+	if v.selectedRow >= len(v.rows) && len(v.rows) > 0 {
+		v.selectedRow = len(v.rows) - 1
+	}
+	if v.selectedRow < 0 && len(v.rows) > 0 {
+		v.selectedRow = 0
+	}
+
+	// Ensure viewportStart is within bounds
+	if v.viewportStart >= len(v.rows) {
+		v.viewportStart = 0
+		if len(v.rows) > v.viewportHeight {
+			v.viewportStart = len(v.rows) - v.viewportHeight
+		}
+	}
+	if v.viewportStart < 0 {
+		v.viewportStart = 0
+	}
+
+	// Adjust viewport to keep selected item visible
+	if v.selectedRow < v.viewportStart {
+		v.viewportStart = v.selectedRow
+	} else if v.selectedRow >= v.viewportStart+v.viewportHeight {
+		v.viewportStart = v.selectedRow - v.viewportHeight + 1
+	}
+
+	// Ensure we show at least 3 items around selected if possible
+	contextRows := 3
+	if v.viewportHeight > contextRows*2 && len(v.rows) > 0 {
+		idealStart := v.selectedRow - contextRows
+		if idealStart >= 0 && idealStart+v.viewportHeight <= len(v.rows) {
+			v.viewportStart = idealStart
+		}
+	}
 }
 
 // RefreshResources fetches and updates the resource list
@@ -307,6 +360,25 @@ func (v *ResourceView) renderCustomTable() string {
 		v.viewportHeight = v.height - 6 // Account for header and borders
 	}
 
+	// Ensure selected row is within bounds
+	if v.selectedRow >= len(v.rows) && len(v.rows) > 0 {
+		v.selectedRow = len(v.rows) - 1
+	}
+	if v.selectedRow < 0 && len(v.rows) > 0 {
+		v.selectedRow = 0
+	}
+
+	// Ensure viewportStart is within bounds
+	if v.viewportStart >= len(v.rows) {
+		v.viewportStart = 0
+		if len(v.rows) > v.viewportHeight {
+			v.viewportStart = len(v.rows) - v.viewportHeight
+		}
+	}
+	if v.viewportStart < 0 {
+		v.viewportStart = 0
+	}
+
 	// Ensure selected row is visible
 	if v.selectedRow < v.viewportStart {
 		v.viewportStart = v.selectedRow
@@ -321,7 +393,10 @@ func (v *ResourceView) renderCustomTable() string {
 		endRow = len(v.rows)
 	}
 
-	for i := v.viewportStart; i < endRow; i++ {
+	for i := v.viewportStart; i < endRow && i < len(v.rows); i++ {
+		if i < 0 || i >= len(v.rows) {
+			continue // Skip invalid indices
+		}
 		row := v.rows[i]
 		isSelected := i == v.selectedRow
 		var cells []string
@@ -558,11 +633,27 @@ func (v *ResourceView) restoreSelection(newSelectedRow, previousSelectedRow int)
 	} else {
 		// No items left
 		v.selectedRow = 0
+		v.viewportStart = 0
+		return
+	}
+
+	// Ensure viewport is within bounds first
+	if v.viewportStart >= len(v.rows) {
+		v.viewportStart = 0
+		if len(v.rows) > v.viewportHeight {
+			v.viewportStart = len(v.rows) - v.viewportHeight
+		}
+	}
+	if v.viewportStart < 0 {
+		v.viewportStart = 0
 	}
 
 	// Adjust viewport to keep selection visible
 	if v.selectedRow >= v.viewportStart+v.viewportHeight {
 		v.viewportStart = v.selectedRow - v.viewportHeight + 1
+		if v.viewportStart < 0 {
+			v.viewportStart = 0
+		}
 	} else if v.selectedRow < v.viewportStart {
 		v.viewportStart = v.selectedRow
 	}

@@ -52,10 +52,11 @@ func (v *ConfirmView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "enter", " ":
 			// Action confirmed or cancelled - will be handled by parent
 			return v, nil
-		case "esc", "q":
-			// Cancel
+		case "q":
+			// Cancel with q
 			v.confirmed = false
 			return v, nil
+			// Don't handle ESC here - let parent handle it
 		}
 	}
 	return v, nil
