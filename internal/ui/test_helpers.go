@@ -35,6 +35,10 @@ func createTestApp(t *testing.T) *App {
 	app.height = 24
 	app.ready = true
 
+	// For pure UI testing, ensure both clients are nil to trigger test paths
+	app.k8sClient = nil
+	app.multiClient = nil
+
 	// Ensure modes are initialized (they should be from NewApp, but let's be explicit)
 	if app.modes == nil {
 		app.modes = map[ScreenModeType]ScreenMode{
@@ -45,6 +49,7 @@ func createTestApp(t *testing.T) *App {
 			ModeContextSelector:   NewContextSelectorMode(),
 			ModeNamespaceSelector: NewNamespaceSelectorMode(),
 			ModeConfirmDialog:     NewConfirmDialogMode(),
+			ModeResourceSelector:  NewResourceSelectorMode(),
 		}
 	}
 

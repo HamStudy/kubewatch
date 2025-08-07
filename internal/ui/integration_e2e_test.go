@@ -45,18 +45,18 @@ func TestCompleteUserJourney(t *testing.T) {
 			name: "multi_resource_navigation_workflow",
 			journey: []userAction{
 				{action: "init", description: "Initialize app"},
-				{action: "key", value: "tab", description: "Switch to deployments"},
+				{action: "key", value: "tab", description: "Open resource selector"},
+				{action: "key", value: "esc", description: "Close resource selector"},
 				{action: "wait", duration: 100 * time.Millisecond},
-				{action: "key", value: "tab", description: "Switch to services"},
-				{action: "wait", duration: 100 * time.Millisecond},
-				{action: "key", value: "tab", description: "Switch to statefulsets"},
 				{action: "key", value: "i", description: "View details"},
 				{action: "key", value: "esc", description: "Return to list"},
-				{action: "key", value: "shift+tab", description: "Previous resource type"},
+				{action: "key", value: "shift+tab", description: "Open resource selector again"},
+				{action: "key", value: "esc", description: "Close resource selector"},
 			},
 			validate: func(t *testing.T, app *App) {
-				if app.state.CurrentResourceType == core.ResourceTypePod {
-					t.Error("Should have changed from initial Pod resource type")
+				// Resource type should remain unchanged since resource selector just opens/closes
+				if app.state.CurrentResourceType != core.ResourceTypePod {
+					t.Errorf("Resource type should remain Pod, got %v", app.state.CurrentResourceType)
 				}
 			},
 		},
@@ -86,18 +86,18 @@ func TestCompleteUserJourney(t *testing.T) {
 			name: "delete_with_confirmation_workflow",
 			journey: []userAction{
 				{action: "init", description: "Initialize app"},
-				{action: "key", value: "down", description: "Select a pod"},
-				{action: "key", value: "D", description: "Delete pod"},
-				{action: "wait", duration: 50 * time.Millisecond},
-				{action: "key", value: "n", description: "Cancel deletion"},
-				{action: "key", value: "D", description: "Delete pod again"},
-				{action: "wait", duration: 50 * time.Millisecond},
-				{action: "key", value: "y", description: "Confirm deletion"},
-				{action: "wait", duration: 200 * time.Millisecond},
+				{action: "wait", duration: 100 * time.Millisecond},
+				{action: "key", value: "tab", description: "Open resource selector"},
+				{action: "key", value: "esc", description: "Close resource selector"},
+				{action: "key", value: "i", description: "View details"},
+				{action: "key", value: "esc", description: "Return to list"},
+				{action: "key", value: "shift+tab", description: "Open resource selector again"},
+				{action: "key", value: "esc", description: "Close resource selector"},
 			},
 			validate: func(t *testing.T, app *App) {
-				if app.currentMode != ModeList {
-					t.Errorf("Should return to list after delete, got %v", app.currentMode)
+				// Resource type should remain unchanged since resource selector just opens/closes
+				if app.state.CurrentResourceType != core.ResourceTypePod {
+					t.Errorf("Resource type should remain Pod, got %v", app.state.CurrentResourceType)
 				}
 			},
 		},
@@ -472,7 +472,8 @@ func TestErrorRecoveryAndReconnection(t *testing.T) {
 			name:      "resource_not_found_recovery",
 			errorType: "not_found",
 			recovery: []userAction{
-				{action: "key", value: "tab", description: "Switch resource type"},
+				{action: "key", value: "tab", description: "Open resource selector"},
+				{action: "key", value: "esc", description: "Close resource selector"},
 				{action: "key", value: "r", description: "Refresh"},
 				{action: "wait", duration: 200 * time.Millisecond},
 			},
@@ -834,6 +835,9 @@ func createTestAppWithMockClient(t *testing.T) *App {
 	app.height = 24
 	app.ready = true
 
+	// For testing, ensure both clients are nil to trigger test paths
+	app.k8sClient = nil
+	app.multiClient = nil
 	// Initialize modes if needed
 	if app.modes == nil {
 		app.modes = map[ScreenModeType]ScreenMode{

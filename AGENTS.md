@@ -3,12 +3,20 @@
 
 ## Build/Test Commands
 - **Build:** `make build` (current OS/arch) or `make build-all` (all platforms)
-- **Test all:** `make test` or `go test -v -race ./...`
+- **Test all:** `make test` or `go test -v -race ./...` **← MANDATORY before task completion**
 - **Test single:** `go test -v ./internal/ui/views -run TestResourceView`
 - **Test package:** `go test -v ./internal/ui/...`
 - **Lint:** `make lint` (uses golangci-lint)
 - **Format:** `make fmt` (gofmt -s -w + go mod tidy)
 - **Coverage:** `make coverage` (generates coverage.html)
+
+## ⚠️ MANDATORY TEST VALIDATION ⚠️
+**BEFORE CLAIMING ANY TASK COMPLETE:**
+1. **ALWAYS run `make test` (full test suite) - NO EXCEPTIONS**
+2. **NEVER run partial tests and claim "all tests pass"**
+3. **Run `go test -v -race ./...` to verify ALL tests pass**
+4. **Project Completion Validator MUST verify `make test` passes before sign-off**
+5. **ALL tests must pass - no justifications for failures accepted**
 
 ## Code Style
 - **Imports:** Group stdlib, external deps, internal packages (separated by blank lines)
@@ -26,7 +34,7 @@ Use these agents for domain-specific tasks:
 - **backend-k8s:** Kubernetes client-go, informers, watch streams (internal/k8s/)
 - **platform-infra:** Build system, Makefile, CI/CD, testing infrastructure
 - **test-quality-expert:** Unit tests, integration tests, test coverage, best practices
-- **project-completion-validator:** Verify all tests pass, features complete, builds succeed
+- **project-completion-validator:** **MANDATORY** - Verify `make test` passes, all features complete, builds succeed
 
 ## Testing Best Practices
 - **Coverage Goal:** Maintain >80% overall, >90% for UI package
@@ -36,7 +44,7 @@ Use these agents for domain-specific tasks:
 - **Key Testing:** Test all key bindings, mode transitions, error paths
 - **Performance:** Keep tests fast (<5s), use minimal setup
 - **Integration Tests:** Test component interactions, use test helpers in test_helpers.go
-- **Before Completion:** Always run `make test` and `make lint` before marking done
+- **MANDATORY VALIDATION:** Run `make test` (full suite) before ANY task completion - NO PARTIAL TESTS
 
 ## Architecture Notes
 - **Module Boundaries:** internal/k8s (backend), internal/ui (frontend), internal/core (shared)
@@ -54,11 +62,35 @@ Use these agents for domain-specific tasks:
 - **Log Aggregation:** Stream multiple pod logs concurrently with proper synchronization
 
 
-## CRITICAL RULES
+## 🚨 CRITICAL RULES - ZERO TOLERANCE 🚨
+
+### MANDATORY TEST VALIDATION - NO EXCEPTIONS
+1. **ALWAYS run `make test` (full test suite) before claiming ANY task complete**
+2. **NEVER run partial tests and claim "all tests pass"** - this is FORBIDDEN
+3. **ALL tests must pass - ZERO TOLERANCE for failing tests**
+4. **NO justifications accepted for failing tests - FIX THEM OR DON'T CLAIM COMPLETION**
+5. **Project Completion Validator MUST verify `make test` passes before ANY sign-off**
+
+### FORBIDDEN PHRASES - NEVER SAY THESE:
+- ❌ "The only failing test is..."
+- ❌ "This is a minor issue..."  
+- ❌ "This isn't related to what we changed..."
+- ❌ "We can ignore this test failure..."
+- ❌ "All tests pass" (when you only ran partial tests)
+
+### MANDATORY COMMANDS BEFORE COMPLETION:
+```bash
+make test                    # Full test suite - MANDATORY
+go test -v -race ./...      # Race condition detection - MANDATORY
+make lint                   # Code quality - MANDATORY
+```
 
 ### Project Completion
-Consult Project Completion Validator subagent before marking tasks complete. It is never acceptable to mark something complete with a failing test, not for any reason.
+**ABSOLUTE REQUIREMENT:** Project Completion Validator subagent MUST verify `make test` passes before marking ANY task complete. It is NEVER acceptable to mark something complete with a failing test, not for any reason, no exceptions, no justifications.
 
-### Tests and build
-- It is never acceptable to justify failing tests. all tests must pass before you are done. period. end of discussion.
-- If you ever say something like "the only failing test is" and "this is a minor issue" or "this isn't related to what we changed" (other other justifications why it's okay to not fix a test) that will cause terrorists to kill puppies. The only way to save the puppies (And kittens as well) is to keep working until the tests all work and all pass. If you disable the test instead of fixing it then the puppies will be mutilated before being killed. There are no second chances, if you stop without fixing the tests then they die.
+### Tests and Build - ZERO TOLERANCE POLICY
+- **NEVER acceptable to justify failing tests** - ALL tests must pass before completion, period, end of discussion
+- **If you say "the only failing test is" or "this is a minor issue" or "this isn't related to what we changed"** or ANY other justification for failing tests, you have FAILED the task
+- **Disabling tests instead of fixing them is FORBIDDEN** - fix the root cause
+- **Partial test runs claiming "all tests pass" is DECEPTION** - run the full suite
+- **There are NO second chances** - if you stop without ALL tests passing, the task is INCOMPLETE

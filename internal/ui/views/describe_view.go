@@ -502,6 +502,7 @@ func (v *DescribeView) addIngressSpecificContent(buf *bytes.Buffer) {
 }
 
 func (v *DescribeView) addConfigMapSpecificContent(buf *bytes.Buffer) {
+	buf.WriteString("Type:             ConfigMap\n")
 	buf.WriteString("\nData\n")
 	buf.WriteString("====\n")
 	buf.WriteString("config.yaml:\n")
@@ -897,6 +898,8 @@ Labels:       {{ range $k, $v := .Labels }}{{ $k }}={{ $v }}
               {{ end }}
 Annotations:  {{ range $k, $v := .Annotations }}{{ $k }}: {{ $v }}
               {{ end }}
+
+Type:         ConfigMap
 
 Data
 ====

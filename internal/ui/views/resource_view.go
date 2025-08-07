@@ -1277,10 +1277,15 @@ func (v *ResourceView) updateColumnsForResourceType() {
 func (v *ResourceView) updateTableWithPods(pods []v1.Pod) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
+
+	// Capture state values at the beginning to avoid race conditions
+	sortColumn, sortAscending := v.state.GetSortState()
+	currentNamespace := v.state.GetCurrentNamespace()
+
 	// Update columns for pods
 	v.updateColumnsForResourceType()
 
-	showNamespace := v.state.CurrentNamespace == "" || v.state.CurrentNamespace == "all"
+	showNamespace := currentNamespace == "" || currentNamespace == "all"
 
 	// Save the currently selected resource identity
 	v.saveSelectedIdentity()
@@ -1384,7 +1389,7 @@ func (v *ResourceView) updateTableWithPods(pods []v1.Pod) {
 	}
 
 	// Sort the rows BEFORE restoring selection
-	v.sortRows()
+	v.sortRowsWithState(sortColumn, sortAscending)
 
 	// Restore selection intelligently
 	v.restoreSelectionByIdentity()
@@ -1838,7 +1843,7 @@ type rowWithIdentity struct {
 }
 
 // sortRows sorts the table rows based on the current sort configuration
-func (v *ResourceView) sortRows() {
+func (v *ResourceView) sortRowsWithState(sortColumn string, sortAscending bool) {
 	// Note: This method is called from within updateTableWithPodsMultiContext which already holds the lock
 	// So we don't need to acquire the lock here to avoid deadlock
 
@@ -1846,8 +1851,7 @@ func (v *ResourceView) sortRows() {
 		return
 	}
 
-	// Determine which column to sort by
-	sortColumn := v.state.SortColumn
+	// Use the provided sort state to avoid race conditions
 	if sortColumn == "" {
 		sortColumn = "NAME" // Default sort by name
 	}
@@ -1886,7 +1890,7 @@ func (v *ResourceView) sortRows() {
 
 		// Handle numeric columns specially
 		if sortColumn == "READY" || sortColumn == "RESTARTS" || sortColumn == "AGE" {
-			result := v.compareNumericValues(valueI, valueJ, v.state.SortAscending)
+			result := v.compareNumericValues(valueI, valueJ, sortAscending)
 			// If values are equal, use secondary sort
 			if valueI == valueJ {
 				return v.secondarySort(rowsWithIdentities[i], rowsWithIdentities[j])
@@ -1896,7 +1900,7 @@ func (v *ResourceView) sortRows() {
 
 		// String comparison
 		compareResult := strings.ToLower(valueI) < strings.ToLower(valueJ)
-		if !v.state.SortAscending {
+		if !sortAscending {
 			compareResult = strings.ToLower(valueI) > strings.ToLower(valueJ)
 		}
 
@@ -1917,6 +1921,13 @@ func (v *ResourceView) sortRows() {
 			v.resourceMap[i] = item.identity
 		}
 	}
+}
+
+// sortRows is a wrapper that reads state and calls sortRowsWithState
+func (v *ResourceView) sortRows() {
+	// Read sort state from the state object using synchronized method
+	sortColumn, sortAscending := v.state.GetSortState()
+	v.sortRowsWithState(sortColumn, sortAscending)
 }
 
 // secondarySort provides a stable secondary sort when primary values are equal

@@ -147,7 +147,7 @@ func (m *ListMode) HandleKey(msg tea.KeyMsg, app *App) (bool, tea.Cmd) {
 		if selectedName != "" {
 			// Get the appropriate client for logs
 			var client *k8s.Client
-			if app.isMultiContext {
+			if app.isMultiContext && app.multiClient != nil {
 				contextName := app.getSelectedResourceContext()
 				if contextName != "" {
 					client, _ = app.multiClient.GetClient(contextName)
@@ -168,7 +168,7 @@ func (m *ListMode) HandleKey(msg tea.KeyMsg, app *App) (bool, tea.Cmd) {
 		if selectedName != "" {
 			// Check if we have a valid client before proceeding
 			var hasClient bool
-			if app.isMultiContext {
+			if app.isMultiContext && app.multiClient != nil {
 				contextName := app.getSelectedResourceContext()
 				if contextName != "" {
 					_, err := app.multiClient.GetClient(contextName)
@@ -190,7 +190,7 @@ func (m *ListMode) HandleKey(msg tea.KeyMsg, app *App) (bool, tea.Cmd) {
 		if selectedName != "" {
 			// Check if we have a valid client before proceeding
 			var hasClient bool
-			if app.isMultiContext {
+			if app.isMultiContext && app.multiClient != nil {
 				contextName := app.getSelectedResourceContext()
 				if contextName != "" {
 					_, err := app.multiClient.GetClient(contextName)

@@ -159,56 +159,51 @@ func TestMultiContextFunctionality(t *testing.T) {
 	}
 }
 
-// TestResourceTypeNavigation tests cycling through different resource types
+// TestResourceTypeNavigation tests resource selector functionality
 func TestResourceTypeNavigation(t *testing.T) {
 	app := createTestApp(t)
 
 	initialType := app.state.CurrentResourceType
-	seenTypes := make(map[core.ResourceType]bool)
-	seenTypes[initialType] = true
+	initialMode := app.currentMode
 
-	// Test tab navigation through resource types
-	for i := 0; i < 10; i++ { // Try up to 10 cycles
-		keyMsg := tea.KeyMsg{Type: tea.KeyTab}
-		model, cmd := app.Update(keyMsg)
-		app = model.(*App)
-
-		// Execute refresh command
-		if cmd != nil {
-			_ = cmd
-		}
-
-		currentType := app.state.CurrentResourceType
-		if seenTypes[currentType] && currentType == initialType {
-			// We've cycled back to the beginning
-			break
-		}
-		seenTypes[currentType] = true
-
-		// Verify view still renders
-		view := app.View()
-		if len(view) == 0 {
-			t.Errorf("View should not be empty for resource type %v", currentType)
-		}
-	}
-
-	if len(seenTypes) < 2 {
-		t.Error("Should cycle through at least 2 different resource types")
-	}
-
-	// Test shift+tab (reverse navigation)
-	keyMsg := tea.KeyMsg{Type: tea.KeyShiftTab}
+	// Test tab opens resource selector
+	keyMsg := tea.KeyMsg{Type: tea.KeyTab}
 	model, cmd := app.Update(keyMsg)
+	app = model.(*App)
+
+	// Execute any command
+	if cmd != nil {
+		_ = cmd
+	}
+
+	// Should be in resource selector mode
+	if app.currentMode != ModeResourceSelector {
+		t.Errorf("Expected resource selector mode (%v), got %v", ModeResourceSelector, app.currentMode)
+	}
+
+	// Verify view still renders
+	view := app.View()
+	if len(view) == 0 {
+		t.Error("View should not be empty in resource selector mode")
+	}
+
+	// Test escape returns to list mode
+	escapeMsg := tea.KeyMsg{Type: tea.KeyEsc}
+	model, cmd = app.Update(escapeMsg)
 	app = model.(*App)
 
 	if cmd != nil {
 		_ = cmd
 	}
 
-	// Should have changed resource type
-	if app.state.CurrentResourceType == initialType {
-		// This might be expected if we only have one resource type
-		t.Logf("Resource type unchanged after shift+tab: %v", app.state.CurrentResourceType)
+	// Should be back in list mode
+	if app.currentMode != initialMode {
+		t.Errorf("Expected to return to initial mode (%v), got %v", initialMode, app.currentMode)
+	}
+
+	// Resource type should be unchanged
+	if app.state.CurrentResourceType != initialType {
+		t.Errorf("Resource type should be unchanged, was %v, now %v", initialType, app.state.CurrentResourceType)
 	}
 }
 

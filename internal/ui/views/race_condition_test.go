@@ -124,10 +124,11 @@ func TestRaceConditionFix(t *testing.T) {
 					}()
 
 					// Change sort order to trigger sorting
+					sortColumn, _ := state.GetSortState()
 					if j%2 == 0 {
-						state.SortAscending = true
+						state.SetSortState(sortColumn, true)
 					} else {
-						state.SortAscending = false
+						state.SetSortState(sortColumn, false)
 					}
 
 					rv.updateTableWithPods(pods)

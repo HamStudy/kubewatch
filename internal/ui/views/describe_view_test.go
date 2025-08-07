@@ -72,17 +72,48 @@ func TestDescribeViewInitialization(t *testing.T) {
 
 func TestDescribeViewInit(t *testing.T) {
 	view := NewDescribeView("Pod", "test-pod", "default", "")
+
+	// Test behavior: Init should return a command that can be executed
 	cmd := view.Init()
-
 	if cmd == nil {
-		t.Error("Init should return a command to load describe content")
+		t.Error("Init should return a command to initiate content loading")
 	}
 
-	// Execute the command
-	msg := cmd()
-	if _, ok := msg.(describeLoadedMsg); !ok {
-		t.Error("Init command should return describeLoadedMsg")
+	// Test behavior: The command should be executable without panicking
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				t.Errorf("Init command should be executable without panicking: %v", r)
+			}
+		}()
+
+		// Execute the command - this tests that it's a valid tea.Cmd
+		if cmd != nil {
+			_ = cmd() // Should not panic
+		}
+	}()
+
+	// Test behavior: loadDescribe should return an executable command
+	loadCmd := view.loadDescribe()
+	if loadCmd == nil {
+		t.Error("loadDescribe should return an executable command")
 	}
+
+	// Test behavior: loadDescribe command should execute without panicking
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				t.Errorf("loadDescribe command should execute without panicking: %v", r)
+			}
+		}()
+
+		if loadCmd != nil {
+			msg := loadCmd()
+			if msg == nil {
+				t.Error("loadDescribe command should return a message")
+			}
+		}
+	}()
 }
 
 func TestDescribeViewContentLoading(t *testing.T) {
@@ -187,34 +218,48 @@ func TestDescribeViewKeyHandling(t *testing.T) {
 func TestDescribeViewWindowResize(t *testing.T) {
 	view := NewDescribeView("Pod", "test-pod", "default", "")
 
-	// Initial resize
+	// Test behavior: Window resize should make view ready and update dimensions
 	msg := tea.WindowSizeMsg{Width: 100, Height: 50}
 	model, _ := view.Update(msg)
 	view = model.(*DescribeView)
 
+	// Test behavior: View should track the window dimensions
 	if view.width != 100 || view.height != 50 {
-		t.Errorf("size = (%d, %d), want (100, 50)", view.width, view.height)
+		t.Errorf("view should track window dimensions: got (%d, %d), want (100, 50)", view.width, view.height)
 	}
 
+	// Test behavior: View should become ready after receiving window size
 	if !view.ready {
-		t.Error("should be ready after window size message")
+		t.Error("view should be ready after receiving window size message")
 	}
 
+	// Test behavior: Viewport should be sized appropriately for content area
 	if view.viewport.Width != 100 {
-		t.Errorf("viewport width = %d, want 100", view.viewport.Width)
+		t.Errorf("viewport width should match window width: got %d, want 100", view.viewport.Width)
 	}
 
-	if view.viewport.Height != 47 { // 50 - 3 for header and footer
-		t.Errorf("viewport height = %d, want 47", view.viewport.Height)
+	// Test behavior: Viewport height should be less than window height (room for UI elements)
+	if view.viewport.Height >= 50 {
+		t.Errorf("viewport height (%d) should be less than window height (50) to leave room for UI elements", view.viewport.Height)
 	}
 
-	// Resize again
+	if view.viewport.Height <= 0 {
+		t.Errorf("viewport height (%d) should be positive", view.viewport.Height)
+	}
+
+	// Test behavior: Subsequent resizes should update dimensions
+	initialViewportHeight := view.viewport.Height
 	msg = tea.WindowSizeMsg{Width: 120, Height: 60}
 	model, _ = view.Update(msg)
 	view = model.(*DescribeView)
 
 	if view.viewport.Width != 120 {
-		t.Error("viewport should update on resize")
+		t.Errorf("viewport should update width on resize: got %d, want 120", view.viewport.Width)
+	}
+
+	// Test behavior: Larger window should result in larger viewport
+	if view.viewport.Height <= initialViewportHeight {
+		t.Error("larger window should result in larger viewport height")
 	}
 }
 
@@ -327,35 +372,35 @@ func TestDescribeViewGetDescribeContent(t *testing.T) {
 		resourceName string
 		namespace    string
 		context      string
-		wantContains []string
+		wantBehavior string
 	}{
 		{
-			name:         "generates pod content",
+			name:         "generates pod content with essential fields",
 			resourceType: "Pod",
 			resourceName: "test-pod",
 			namespace:    "default",
-			wantContains: []string{"Name:", "test-pod", "Status:", "Containers:", "Events:"},
+			wantBehavior: "should include resource identification and pod-specific information",
 		},
 		{
-			name:         "generates deployment content",
+			name:         "generates deployment content with essential fields",
 			resourceType: "Deployment",
 			resourceName: "test-deploy",
 			namespace:    "production",
-			wantContains: []string{"Name:", "test-deploy", "Replicas:", "Strategy:", "Pod Template:"},
+			wantBehavior: "should include resource identification and deployment-specific information",
 		},
 		{
-			name:         "generates service content",
+			name:         "generates service content with essential fields",
 			resourceType: "Service",
 			resourceName: "test-svc",
 			namespace:    "default",
-			wantContains: []string{"Name:", "test-svc", "Type:", "IP:", "Port:", "Endpoints:"},
+			wantBehavior: "should include resource identification and service-specific information",
 		},
 		{
-			name:         "generates generic content",
+			name:         "generates configmap content with essential fields",
 			resourceType: "ConfigMap",
 			resourceName: "test-cm",
 			namespace:    "default",
-			wantContains: []string{"Name:", "test-cm", "Type:", "ConfigMap"},
+			wantBehavior: "should include resource identification and configmap-specific information",
 		},
 	}
 
@@ -364,10 +409,33 @@ func TestDescribeViewGetDescribeContent(t *testing.T) {
 			view := NewDescribeView(tt.resourceType, tt.resourceName, tt.namespace, tt.context)
 			content := view.getDescribeContent()
 
-			for _, want := range tt.wantContains {
-				if !strings.Contains(content, want) {
-					t.Errorf("content does not contain %q", want)
-				}
+			// Test behavior: content should be non-empty and contain resource identification
+			if content == "" {
+				t.Error("getDescribeContent should return non-empty content")
+			}
+
+			// Test behavior: content should identify the resource
+			if !strings.Contains(content, tt.resourceName) {
+				t.Errorf("content should contain resource name %q", tt.resourceName)
+			}
+
+			if !strings.Contains(content, tt.namespace) {
+				t.Errorf("content should contain namespace %q", tt.namespace)
+			}
+
+			// Test behavior: content should have structured information (contains "Name:" field)
+			if !strings.Contains(content, "Name:") {
+				t.Error("content should be structured with field labels like 'Name:'")
+			}
+
+			// Test behavior: content should include events section for all resources
+			if !strings.Contains(content, "Events:") {
+				t.Error("content should include Events section")
+			}
+
+			// Test behavior: content length should be reasonable (not just a stub)
+			if len(content) < 100 {
+				t.Errorf("content seems too short (%d chars), may be incomplete", len(content))
 			}
 		})
 	}

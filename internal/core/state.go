@@ -316,3 +316,25 @@ func (s *State) GetAggregatedDeployments() []appsv1.Deployment {
 	}
 	return allDeployments
 }
+
+// GetSortState returns the current sort column and direction in a thread-safe manner
+func (s *State) GetSortState() (string, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.SortColumn, s.SortAscending
+}
+
+// SetSortState updates the sort column and direction in a thread-safe manner
+func (s *State) SetSortState(column string, ascending bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.SortColumn = column
+	s.SortAscending = ascending
+}
+
+// GetCurrentNamespace returns the current namespace in a thread-safe manner
+func (s *State) GetCurrentNamespace() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.CurrentNamespace
+}

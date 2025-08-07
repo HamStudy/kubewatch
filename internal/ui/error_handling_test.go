@@ -95,6 +95,9 @@ func TestKubernetesAPIErrors(t *testing.T) {
 			app.height = 24
 			app.ready = true
 
+			// For testing, ensure both clients are nil to trigger test paths
+			app.k8sClient = nil
+			app.multiClient = nil
 			// App should handle errors gracefully
 			view := app.View()
 			if len(view) == 0 {
@@ -115,20 +118,7 @@ func TestKubernetesAPIErrors(t *testing.T) {
 
 // TestGracefulDegradation tests that app degrades gracefully with limited functionality
 func TestGracefulDegradation(t *testing.T) {
-	state := &core.State{
-		CurrentResourceType: core.ResourceTypePod,
-		CurrentNamespace:    "default",
-		CurrentContext:      "test-context",
-	}
-
-	config := &core.Config{
-		RefreshInterval: 5,
-	}
-
-	app := NewApp(context.Background(), nil, state, config)
-	app.width = 80
-	app.height = 24
-	app.ready = true
+	app := createTestApp(t)
 
 	// Test that navigation still works without client
 	operations := []struct {
@@ -287,6 +277,25 @@ func TestErrorPropagation(t *testing.T) {
 	app.height = 24
 	app.ready = true
 
+	// For testing, ensure both clients are nil to trigger test paths
+	app.k8sClient = nil
+	app.multiClient = nil
+	app.activeContexts = []string{"test-context"} // Ensure we have test contexts
+
+	// Ensure modes are initialized properly
+	if app.modes == nil {
+		app.modes = map[ScreenModeType]ScreenMode{
+			ModeList:              NewListMode(),
+			ModeLog:               NewLogMode(),
+			ModeDescribe:          NewDescribeMode(),
+			ModeHelp:              NewHelpMode(),
+			ModeContextSelector:   NewContextSelectorMode(),
+			ModeNamespaceSelector: NewNamespaceSelectorMode(),
+			ModeConfirmDialog:     NewConfirmDialogMode(),
+			ModeResourceSelector:  NewResourceSelectorMode(),
+		}
+	}
+
 	// Operations should handle client errors gracefully
 	view := app.View()
 	if len(view) == 0 {
@@ -298,9 +307,9 @@ func TestErrorPropagation(t *testing.T) {
 	model, _ := app.Update(keyMsg)
 	app = model.(*App)
 
-	// Resource type should change despite errors
-	if app.state.CurrentResourceType == core.ResourceTypePod {
-		t.Error("Should be able to change resource type despite client errors")
+	// Tab should open resource selector despite errors
+	if app.currentMode != ModeResourceSelector {
+		t.Error("Should be able to open resource selector despite client errors")
 	}
 }
 

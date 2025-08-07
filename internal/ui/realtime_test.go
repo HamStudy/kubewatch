@@ -274,7 +274,8 @@ func TestConcurrentUpdateHandling(t *testing.T) {
 
 	// Simulate rapid key presses and refreshes
 	updates := []tea.Msg{
-		tea.KeyMsg{Type: tea.KeyTab},                       // Change resource type
+		tea.KeyMsg{Type: tea.KeyTab},                       // Open resource selector
+		tea.KeyMsg{Type: tea.KeyEsc},                       // Close resource selector
 		tickMsg(time.Now()),                                // Auto-refresh
 		tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("s")}, // Sort
 		tickMsg(time.Now()),                                // Another refresh
