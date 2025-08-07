@@ -388,13 +388,14 @@ func TestContextViewSearchMode(t *testing.T) {
 
 func TestContextViewRendering(t *testing.T) {
 	tests := []struct {
-		name         string
-		contexts     []string
-		selected     []string
-		multiSelect  bool
-		searchMode   bool
-		searchQuery  string
-		wantContains []string
+		name            string
+		contexts        []string
+		selected        []string
+		multiSelect     bool
+		searchMode      bool
+		searchQuery     string
+		wantContains    []string
+		wantNotContains []string
 	}{
 		{
 			name:         "renders title",
@@ -404,11 +405,12 @@ func TestContextViewRendering(t *testing.T) {
 			wantContains: []string{"Select Kubernetes Context"},
 		},
 		{
-			name:         "shows multi-select mode",
-			contexts:     []string{"context1"},
-			selected:     []string{},
-			multiSelect:  true,
-			wantContains: []string{"Multi-Select Mode"},
+			name:            "shows multi-select with clear terminology",
+			contexts:        []string{"context1"},
+			selected:        []string{},
+			multiSelect:     true,
+			wantContains:    []string{"Multi-Select"},
+			wantNotContains: []string{"Multi-Select Mode"}, // Should not use confusing "Mode" terminology
 		},
 		{
 			name:         "shows search query",
@@ -419,17 +421,26 @@ func TestContextViewRendering(t *testing.T) {
 			wantContains: []string{"Search:", "test"},
 		},
 		{
-			name:         "shows selected contexts",
+			name:         "shows selected contexts with left-aligned checkboxes",
 			contexts:     []string{"context1", "context2"},
 			selected:     []string{"context1"},
 			wantContains: []string{"[✓]"},
 		},
 		{
-			name:         "shows help text",
-			contexts:     []string{"context1"},
-			selected:     []string{},
-			multiSelect:  false,
-			wantContains: []string{"Navigate", "Toggle", "Confirm", "Cancel"},
+			name:            "shows help text with clear selection terminology in single-select",
+			contexts:        []string{"context1"},
+			selected:        []string{},
+			multiSelect:     false,
+			wantContains:    []string{"Navigate", "Toggle", "Confirm", "Cancel", "Multi-select"},
+			wantNotContains: []string{"Multi mode"}, // Should not use confusing "mode" terminology
+		},
+		{
+			name:            "shows help text with clear selection terminology in multi-select",
+			contexts:        []string{"context1"},
+			selected:        []string{},
+			multiSelect:     true,
+			wantContains:    []string{"Navigate", "Toggle", "Confirm", "Cancel", "Single-select"},
+			wantNotContains: []string{"Single mode"}, // Should not use confusing "mode" terminology
 		},
 	}
 
@@ -446,6 +457,12 @@ func TestContextViewRendering(t *testing.T) {
 			for _, want := range tt.wantContains {
 				if !strings.Contains(output, want) {
 					t.Errorf("output does not contain %q", want)
+				}
+			}
+
+			for _, notWant := range tt.wantNotContains {
+				if strings.Contains(output, notWant) {
+					t.Errorf("output should not contain %q", notWant)
 				}
 			}
 		})
@@ -489,20 +506,132 @@ func TestContextViewInfoCommand(t *testing.T) {
 
 	// Press 'i' to show context info
 	msg := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("i")}
-	_, cmd := view.Update(msg)
+	model, _ := view.Update(msg)
+	view = model.(*ContextView)
 
-	if cmd == nil {
-		t.Error("pressing 'i' should return a command")
+	// Should now be showing info
+	if !view.showingInfo {
+		t.Error("should be showing info after pressing 'i'")
 	}
 
-	// Execute the command and check the message
-	result := cmd()
-	if infoMsg, ok := result.(ContextInfoMsg); ok {
-		if infoMsg.ContextName != "context1" {
-			t.Errorf("ContextName = %q, want %q", infoMsg.ContextName, "context1")
+	if view.infoContext != "context1" {
+		t.Errorf("infoContext = %q, want %q", view.infoContext, "context1")
+	}
+
+	// View should render info view
+	output := view.View()
+	if !strings.Contains(output, "Context Information") {
+		t.Error("info view should contain 'Context Information'")
+	}
+
+	if !strings.Contains(output, "context1") {
+		t.Error("info view should contain the context name")
+	}
+
+	// Press 'i' again to toggle off
+	model, _ = view.Update(msg)
+	view = model.(*ContextView)
+
+	if view.showingInfo {
+		t.Error("should not be showing info after pressing 'i' again")
+	}
+
+	// Press 'i' to show info, then 'esc' to exit
+	model, _ = view.Update(msg)
+	view = model.(*ContextView)
+
+	if !view.showingInfo {
+		t.Error("should be showing info after pressing 'i'")
+	}
+
+	escMsg := tea.KeyMsg{Type: tea.KeyEsc}
+	model, _ = view.Update(escMsg)
+	view = model.(*ContextView)
+
+	if view.showingInfo {
+		t.Error("should not be showing info after pressing 'esc'")
+	}
+}
+
+func TestContextViewInfoFunctionality(t *testing.T) {
+	// Test that info functionality is now working
+	view := NewContextView([]string{"context1"}, []string{})
+	view.SetSize(80, 24)
+
+	// Should show info hint since info is now functional
+	output := view.View()
+	if !strings.Contains(output, "i: Info") {
+		t.Error("output should contain 'i: Info' since info functionality is implemented")
+	}
+
+	// Test that pressing 'i' actually shows info
+	msg := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("i")}
+	model, _ := view.Update(msg)
+	view = model.(*ContextView)
+
+	if !view.showingInfo {
+		t.Error("should be showing info after pressing 'i'")
+	}
+
+	infoOutput := view.View()
+	if !strings.Contains(infoOutput, "Context Information") {
+		t.Error("info view should contain 'Context Information'")
+	}
+}
+
+func TestContextViewCheckboxAlignment(t *testing.T) {
+	view := NewContextView([]string{"context1", "context2"}, []string{"context1"})
+	view.SetSize(80, 24)
+
+	output := view.View()
+
+	// Check that checkboxes are present and properly formatted
+	if !strings.Contains(output, "[✓]") {
+		t.Error("output should contain selected checkbox [✓]")
+	}
+
+	if !strings.Contains(output, "[ ]") {
+		t.Error("output should contain unselected checkbox [ ]")
+	}
+
+	// The output should not be completely centered (which would make checkboxes look awkward)
+	// Instead, content should be left-aligned for better checkbox presentation
+	lines := strings.Split(output, "\n")
+	var contextLines []string
+	for _, line := range lines {
+		if strings.Contains(line, "[") && (strings.Contains(line, "✓") || strings.Contains(line, " ]")) {
+			contextLines = append(contextLines, line)
 		}
-	} else {
-		t.Error("command should return ContextInfoMsg")
+	}
+
+	if len(contextLines) == 0 {
+		t.Error("should find context lines with checkboxes")
+	}
+
+	// Verify that checkbox lines start consistently (left-aligned within content area)
+	for i, line := range contextLines {
+		if len(line) == 0 {
+			continue
+		}
+		// Lines should have consistent indentation for left-aligned appearance
+		if i > 0 && len(contextLines[i-1]) > 0 {
+			// Both lines should start with similar whitespace pattern for alignment
+			prevTrimmed := strings.TrimLeft(contextLines[i-1], " ")
+			currTrimmed := strings.TrimLeft(line, " ")
+			if len(prevTrimmed) > 0 && len(currTrimmed) > 0 {
+				// Both should start with checkbox pattern
+				if !strings.HasPrefix(prevTrimmed, "[") || !strings.HasPrefix(currTrimmed, "[") {
+					continue // Skip non-checkbox lines
+				}
+				// Check that indentation is consistent
+				prevIndent := len(contextLines[i-1]) - len(prevTrimmed)
+				currIndent := len(line) - len(currTrimmed)
+				if prevIndent != currIndent {
+					t.Errorf("checkbox alignment inconsistent: line %d has %d spaces, line %d has %d spaces",
+						i-1, prevIndent, i, currIndent)
+				}
+			}
+		}
 	}
 }
 

@@ -20,6 +20,8 @@ type ContextView struct {
 	multiSelect      bool            // Toggle between single and multi-select mode
 	loading          bool            // Show loading indicator
 	loadingContexts  map[string]bool // Track which contexts are loading
+	showingInfo      bool            // Whether currently showing context info
+	infoContext      string          // Context name for which info is being shown
 }
 
 // NewContextView creates a new context selector view
@@ -127,17 +129,27 @@ func (v *ContextView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			v.SearchMode = true
 			v.searchQuery = ""
 		case "i":
-			// Show context info
-			visibleContexts := v.getVisibleContexts()
-			if v.currentIndex < len(visibleContexts) {
-				ctx := visibleContexts[v.currentIndex]
-				return v, v.showContextInfo(ctx)
+			// Toggle context info display
+			if v.showingInfo {
+				v.showingInfo = false
+				v.infoContext = ""
+			} else {
+				visibleContexts := v.getVisibleContexts()
+				if v.currentIndex < len(visibleContexts) {
+					ctx := visibleContexts[v.currentIndex]
+					v.showingInfo = true
+					v.infoContext = ctx
+				}
 			}
 		case "enter":
 			// Confirm selection
 			return v, nil
 		case "esc", "q":
-			// Cancel
+			// Cancel or exit info mode
+			if v.showingInfo {
+				v.showingInfo = false
+				v.infoContext = ""
+			}
 			return v, nil
 		}
 	}
@@ -146,6 +158,11 @@ func (v *ContextView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 // View renders the context selector
 func (v *ContextView) View() string {
+	// If showing info, render info view instead
+	if v.showingInfo {
+		return v.renderInfoView()
+	}
+
 	titleStyle := lipgloss.NewStyle().
 		Bold(true).
 		Foreground(lipgloss.Color("86")).
@@ -153,7 +170,7 @@ func (v *ContextView) View() string {
 
 	title := "Select Kubernetes Context(s)"
 	if v.multiSelect {
-		title += " [Multi-Select Mode]"
+		title += " [Multi-Select]"
 	}
 
 	var content strings.Builder
@@ -220,19 +237,19 @@ func (v *ContextView) View() string {
 
 	helpText := "↑↓: Navigate | Space: Toggle | Enter: Confirm | i: Info | Esc: Cancel"
 	if v.multiSelect {
-		helpText += " | a: All | m: Single mode"
+		helpText += " | a: All | m: Single-select"
 	} else {
-		helpText += " | m: Multi mode"
+		helpText += " | m: Multi-select"
 	}
 	helpText += " | /: Search"
 
 	content.WriteString(helpStyle.Render(helpText))
 
-	// Center in window
+	// Center vertically but left-align content for better checkbox alignment
 	return lipgloss.Place(
 		v.width,
 		v.height,
-		lipgloss.Center,
+		lipgloss.Left,
 		lipgloss.Center,
 		content.String(),
 	)
@@ -321,4 +338,57 @@ func (v *ContextView) SetContextLoading(contextName string, loading bool) {
 // IsLoading returns whether the view is in loading state
 func (v *ContextView) IsLoading() bool {
 	return v.loading
+}
+
+// renderInfoView renders the context information view
+func (v *ContextView) renderInfoView() string {
+	titleStyle := lipgloss.NewStyle().
+		Bold(true).
+		Foreground(lipgloss.Color("86")).
+		MarginBottom(1)
+
+	infoStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("252")).
+		MarginBottom(1)
+
+	helpStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("240")).
+		MarginTop(2)
+
+	var content strings.Builder
+	content.WriteString(titleStyle.Render(fmt.Sprintf("Context Information: %s", v.infoContext)))
+	content.WriteString("\n\n")
+
+	// Basic context information
+	content.WriteString(infoStyle.Render("Context Name: " + v.infoContext))
+	content.WriteString("\n")
+
+	// Add some basic info (in a real implementation, this would come from kubectl config)
+	content.WriteString(infoStyle.Render("Type: Kubernetes Context"))
+	content.WriteString("\n")
+
+	if v.selectedContexts[v.infoContext] {
+		content.WriteString(infoStyle.Render("Status: Currently Selected"))
+	} else {
+		content.WriteString(infoStyle.Render("Status: Available"))
+	}
+	content.WriteString("\n\n")
+
+	// Note about functionality
+	content.WriteString(infoStyle.Render("Note: This is a basic info display. In a full implementation,"))
+	content.WriteString("\n")
+	content.WriteString(infoStyle.Render("this would show cluster details, server URL, namespace, etc."))
+	content.WriteString("\n")
+
+	// Help text
+	content.WriteString(helpStyle.Render("i: Close Info | Esc: Back to Context List"))
+
+	// Center vertically but left-align content
+	return lipgloss.Place(
+		v.width,
+		v.height,
+		lipgloss.Left,
+		lipgloss.Center,
+		content.String(),
+	)
 }
