@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/HamStudy/kubewatch/internal/components/dropdown"
 	"github.com/HamStudy/kubewatch/internal/core"
 	"github.com/HamStudy/kubewatch/internal/k8s"
 	"github.com/HamStudy/kubewatch/internal/ui/views"
@@ -127,12 +128,13 @@ type App struct {
 	activeContexts      []string
 
 	// Views
-	resourceView  *views.ResourceView
-	logView       *views.LogView
-	helpView      *views.HelpView
-	namespaceView *views.NamespaceView
-	confirmView   *views.ConfirmView
-	describeView  *views.DescribeView
+	resourceView         *views.ResourceView
+	logView              *views.LogView
+	helpView             *views.HelpView
+	namespaceView        *views.NamespaceView
+	confirmView          *views.ConfirmView
+	describeView         *views.DescribeView
+	resourceSelectorView *views.ResourceSelectorView
 
 	// Screen mode system
 	currentMode  ScreenModeType
@@ -155,22 +157,30 @@ type App struct {
 
 // NewApp creates a new application instance
 func NewApp(ctx context.Context, k8sClient *k8s.Client, state *core.State, config *core.Config) *App {
-	// Get current context for single-context mode
+	// Always use multi-context mode - get current context and create multi-client
 	var activeContexts []string
 	if _, currentCtx, err := k8s.GetAvailableContexts(); err == nil && currentCtx != "" {
 		activeContexts = []string{currentCtx}
 	}
 
+	// Create multi-context client even for single context
+	var multiClient *k8s.MultiContextClient
+	if len(activeContexts) > 0 {
+		if mc, err := k8s.NewMultiContextClient(activeContexts); err == nil {
+			multiClient = mc
+		}
+	}
+
 	app := &App{
 		ctx:            ctx,
-		k8sClient:      k8sClient,
+		multiClient:    multiClient,
 		state:          state,
 		config:         config,
 		keys:           DefaultKeyMap(),
-		resourceView:   views.NewResourceView(state, k8sClient),
+		resourceView:   views.NewResourceViewWithMultiContext(state, multiClient),
 		logView:        views.NewLogView(),
 		helpView:       views.NewHelpView(),
-		isMultiContext: false,
+		isMultiContext: true, // Always use multi-context mode
 		activeContexts: activeContexts,
 		currentMode:    ModeList,
 		previousMode:   ModeList,
@@ -185,6 +195,7 @@ func NewApp(ctx context.Context, k8sClient *k8s.Client, state *core.State, confi
 		ModeContextSelector:   NewContextSelectorMode(),
 		ModeNamespaceSelector: NewNamespaceSelectorMode(),
 		ModeConfirmDialog:     NewConfirmDialogMode(),
+		ModeResourceSelector:  NewResourceSelectorMode(),
 	}
 
 	return app
@@ -193,18 +204,18 @@ func NewApp(ctx context.Context, k8sClient *k8s.Client, state *core.State, confi
 // NewAppWithMultiContext creates a new application instance with multi-context support
 func NewAppWithMultiContext(ctx context.Context, multiClient *k8s.MultiContextClient, state *core.State, config *core.Config) *App {
 	app := &App{
-		ctx:            ctx,
-		multiClient:    multiClient,
-		state:          state,
-		config:         config,
-		keys:           DefaultKeyMap(),
-		resourceView:   views.NewResourceViewWithMultiContext(state, multiClient),
-		logView:        views.NewLogView(),
-		helpView:       views.NewHelpView(),
-		isMultiContext: true,
-		activeContexts: state.CurrentContexts,
-		currentMode:    ModeList,
-		previousMode:   ModeList,
+		ctx:                  ctx,
+		multiClient:          multiClient,
+		state:                state,
+		config:               config,
+		keys:                 DefaultKeyMap(),
+		resourceView:         views.NewResourceViewWithMultiContext(state, multiClient),
+		logView:              views.NewLogView(),
+		helpView:             views.NewHelpView(),
+		resourceSelectorView: views.NewResourceSelectorView(),
+		isMultiContext:       true, activeContexts: state.CurrentContexts,
+		currentMode:  ModeList,
+		previousMode: ModeList,
 	}
 
 	// Initialize screen modes
@@ -216,6 +227,7 @@ func NewAppWithMultiContext(ctx context.Context, multiClient *k8s.MultiContextCl
 		ModeContextSelector:   NewContextSelectorMode(),
 		ModeNamespaceSelector: NewNamespaceSelectorMode(),
 		ModeConfirmDialog:     NewConfirmDialogMode(),
+		ModeResourceSelector:  NewResourceSelectorMode(),
 	}
 
 	return app
@@ -294,6 +306,12 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				a.describeView = describeModel.(*views.DescribeView)
 				return a, viewCmd
 			}
+		case ModeResourceSelector:
+			if a.resourceSelectorView != nil {
+				selectorModel, viewCmd := a.resourceSelectorView.Update(msg)
+				a.resourceSelectorView = selectorModel.(*views.ResourceSelectorView)
+				return a, viewCmd
+			}
 		}
 
 	case tea.WindowSizeMsg:
@@ -326,6 +344,36 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case contextInfoDisplayMsg:
 		// For now, just log the context info (in a real app, you might show a popup)
 		// The context selector will remain open
+		return a, nil
+
+	case namespacesLoadedMsg:
+		// Update namespace view with loaded namespaces
+		if a.namespaceView != nil {
+			if msg.err != nil {
+				// Handle error - for now, just show empty list
+				a.namespaceView.SetNamespaces([]v1.Namespace{})
+			} else {
+				a.namespaceView.SetNamespaces(msg.namespaces)
+			}
+		}
+		return a, nil
+
+	case dropdown.SelectedMsg:
+		// Handle dropdown selection
+		if a.currentMode == ModeResourceSelector {
+			if resourceType, ok := msg.Option.Value.(core.ResourceType); ok {
+				a.state.SetResourceType(resourceType)
+				a.setMode(ModeList)
+				return a, a.resourceView.RefreshResources()
+			}
+		}
+		return a, nil
+
+	case dropdown.CancelledMsg:
+		// Handle dropdown cancellation
+		if a.currentMode == ModeResourceSelector {
+			a.setMode(ModeList)
+		}
 		return a, nil
 	}
 
@@ -419,6 +467,11 @@ func (a *App) View() string {
 
 	case ModeHelp:
 		return a.helpView.View()
+
+	case ModeResourceSelector:
+		if a.resourceSelectorView != nil {
+			return a.resourceSelectorView.View()
+		}
 
 	case ModeDescribe:
 		if a.describeView != nil {
@@ -577,8 +630,8 @@ func (a *App) startRefreshTimer() tea.Cmd {
 
 // openNamespaceSelector opens the namespace selection popup
 func (a *App) openNamespaceSelector() tea.Cmd {
-	// For testing or when k8s client is not available, use mock namespaces
-	if a.k8sClient == nil {
+	// For testing or when no clients are available, use mock namespaces
+	if a.k8sClient == nil && a.multiClient == nil {
 		// Create namespace view with test namespaces
 		testNamespaces := []v1.Namespace{
 			{ObjectMeta: metav1.ObjectMeta{Name: "default"}},
@@ -592,21 +645,32 @@ func (a *App) openNamespaceSelector() tea.Cmd {
 		return nil
 	}
 
+	// Create loading namespace view
+	loadingMessage := "Loading namespaces..."
+	if a.isMultiContext {
+		loadingMessage = fmt.Sprintf("Loading namespaces from %d contexts...", len(a.activeContexts))
+	}
+
+	a.namespaceView = views.NewNamespaceViewWithLoading(a.state.CurrentNamespace, loadingMessage)
+	a.namespaceView.SetSize(a.width, a.height)
+	a.showNamespacePopup = true
+	a.setMode(ModeNamespaceSelector)
+
+	// Start async namespace loading
 	return func() tea.Msg {
 		ctx := context.Background()
-		namespaces, err := a.k8sClient.ListNamespaces(ctx)
-		if err != nil {
-			// Return error message
-			return errMsg{err}
+
+		if a.isMultiContext && a.multiClient != nil {
+			// Multi-context mode: get unique namespaces from all contexts
+			namespaces, err := a.multiClient.GetUniqueNamespaces(ctx)
+			return namespacesLoadedMsg{namespaces: namespaces, err: err}
+		} else if a.k8sClient != nil {
+			// Single-context mode
+			namespaces, err := a.k8sClient.ListNamespaces(ctx)
+			return namespacesLoadedMsg{namespaces: namespaces, err: err}
 		}
 
-		// Create namespace view
-		a.namespaceView = views.NewNamespaceView(namespaces, a.state.CurrentNamespace)
-		a.namespaceView.SetSize(a.width, a.height)
-		a.showNamespacePopup = true
-		a.setMode(ModeNamespaceSelector)
-
-		return nil
+		return namespacesLoadedMsg{namespaces: []v1.Namespace{}, err: fmt.Errorf("no kubernetes client available")}
 	}
 }
 
@@ -805,33 +869,28 @@ func (a *App) applyContextSelection() tea.Cmd {
 	}
 	newContexts := a.contextView.GetSelectedContexts()
 	if len(newContexts) > 0 {
+		// Show loading indicators for selected contexts
+		for _, ctx := range newContexts {
+			a.contextView.SetContextLoading(ctx, true)
+		}
+
 		a.activeContexts = newContexts
 		a.state.SetCurrentContexts(newContexts)
 
-		if len(newContexts) == 1 {
-			// Single context mode - create a single client
-			singleClient, err := k8s.NewClientWithOptions("", &k8s.ClientOptions{
-				Context: newContexts[0],
-			})
-			if err == nil {
-				a.k8sClient = singleClient
-				a.multiClient = nil
-				a.isMultiContext = false
-				// Update resource view with single client
-				a.resourceView = views.NewResourceView(a.state, singleClient)
-				a.resourceView.SetSize(a.width, a.height)
-			}
-		} else {
-			// Multi-context mode - create multi-client
-			multiClient, err := k8s.NewMultiContextClient(newContexts)
-			if err == nil {
-				a.multiClient = multiClient
-				a.k8sClient = nil
-				a.isMultiContext = true
-				// Update resource view with multi-client
-				a.resourceView = views.NewResourceViewWithMultiContext(a.state, multiClient)
-				a.resourceView.SetSize(a.width, a.height)
-			}
+		// Always use multi-context mode regardless of number of contexts
+		multiClient, err := k8s.NewMultiContextClient(newContexts)
+		if err == nil {
+			a.multiClient = multiClient
+			a.k8sClient = nil
+			a.isMultiContext = true
+			// Update resource view with multi-client
+			a.resourceView = views.NewResourceViewWithMultiContext(a.state, multiClient)
+			a.resourceView.SetSize(a.width, a.height)
+		}
+
+		// Clear loading indicators
+		for _, ctx := range newContexts {
+			a.contextView.SetContextLoading(ctx, false)
 		}
 
 		// Refresh resources with new contexts
@@ -898,6 +957,40 @@ func (a *App) showContextInfo(contextName string) tea.Cmd {
 	}
 }
 
+// openResourceSelector opens the resource type selection dropdown
+func (a *App) openResourceSelector() tea.Cmd {
+	if a.resourceSelectorView == nil {
+		a.resourceSelectorView = views.NewResourceSelectorView()
+	}
+
+	// Set current resource type in the dropdown
+	a.resourceSelectorView.SetCurrentResourceType(a.state.CurrentResourceType)
+	a.resourceSelectorView.SetSize(a.width, a.height)
+	a.resourceSelectorView.Open()
+	a.setMode(ModeResourceSelector)
+
+	return nil
+}
+
+// applyResourceSelection applies the selected resource type
+func (a *App) applyResourceSelection() tea.Cmd {
+	if a.resourceSelectorView == nil {
+		a.setMode(ModeList)
+		return nil
+	}
+
+	// Get the selected resource type from the dropdown
+	selectedOption := a.resourceSelectorView.GetSelectedOption()
+	if resourceType, ok := selectedOption.Value.(core.ResourceType); ok {
+		a.state.SetResourceType(resourceType)
+		a.setMode(ModeList)
+		return a.resourceView.RefreshResources()
+	}
+
+	a.setMode(ModeList)
+	return nil
+}
+
 // Message types
 type errMsg struct{ err error }
 type deleteCompleteMsg struct{ name string }
@@ -905,4 +998,8 @@ type contextSelectionMsg struct{ contexts []string }
 type contextInfoDisplayMsg struct {
 	contextName string
 	info        string
+}
+type namespacesLoadedMsg struct {
+	namespaces []v1.Namespace
+	err        error
 }

@@ -16,8 +16,10 @@ type ContextView struct {
 	width            int
 	height           int
 	searchQuery      string
-	searchMode       bool
-	multiSelect      bool // Toggle between single and multi-select mode
+	SearchMode       bool
+	multiSelect      bool            // Toggle between single and multi-select mode
+	loading          bool            // Show loading indicator
+	loadingContexts  map[string]bool // Track which contexts are loading
 }
 
 // NewContextView creates a new context selector view
@@ -32,6 +34,8 @@ func NewContextView(contexts []string, currentContexts []string) *ContextView {
 		selectedContexts: selectedMap,
 		currentIndex:     0,
 		multiSelect:      len(currentContexts) > 1,
+		loading:          false,
+		loadingContexts:  make(map[string]bool),
 	}
 }
 
@@ -48,13 +52,13 @@ func (v *ContextView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		v.height = msg.Height
 
 	case tea.KeyMsg:
-		if v.searchMode {
+		if v.SearchMode {
 			switch msg.Type {
 			case tea.KeyEscape:
-				v.searchMode = false
+				v.SearchMode = false
 				v.searchQuery = ""
 			case tea.KeyEnter:
-				v.searchMode = false
+				v.SearchMode = false
 			case tea.KeyBackspace:
 				if len(v.searchQuery) > 0 {
 					v.searchQuery = v.searchQuery[:len(v.searchQuery)-1]
@@ -64,6 +68,7 @@ func (v *ContextView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					v.searchQuery += string(msg.Runes)
 				}
 			}
+			// Block all other keys while in search mode
 			return v, nil
 		}
 
@@ -119,7 +124,7 @@ func (v *ContextView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 		case "/":
-			v.searchMode = true
+			v.SearchMode = true
 			v.searchQuery = ""
 		case "i":
 			// Show context info
@@ -156,7 +161,7 @@ func (v *ContextView) View() string {
 	content.WriteString("\n\n")
 
 	// Search or filter display
-	if v.searchMode {
+	if v.SearchMode {
 		searchStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("229"))
 		content.WriteString(searchStyle.Render(fmt.Sprintf("Search: %s_", v.searchQuery)))
 		content.WriteString("\n\n")
@@ -187,7 +192,13 @@ func (v *ContextView) View() string {
 		} else {
 			line = "[ ] "
 		}
-		line += ctx
+
+		// Add loading indicator if context is loading
+		if v.loadingContexts[ctx] {
+			line += ctx + " (loading...)"
+		} else {
+			line += ctx
+		}
 
 		// Apply styles
 		if v.selectedContexts[ctx] {
@@ -291,4 +302,23 @@ func (v *ContextView) ensureValidIndex() {
 	if v.currentIndex < 0 {
 		v.currentIndex = 0
 	}
+}
+
+// SetLoading sets the loading state for the entire view
+func (v *ContextView) SetLoading(loading bool) {
+	v.loading = loading
+}
+
+// SetContextLoading sets the loading state for a specific context
+func (v *ContextView) SetContextLoading(contextName string, loading bool) {
+	if loading {
+		v.loadingContexts[contextName] = true
+	} else {
+		delete(v.loadingContexts, contextName)
+	}
+}
+
+// IsLoading returns whether the view is in loading state
+func (v *ContextView) IsLoading() bool {
+	return v.loading
 }

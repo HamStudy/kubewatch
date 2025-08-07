@@ -18,6 +18,8 @@ type NamespaceView struct {
 	width            int
 	height           int
 	currentNamespace string
+	loading          bool
+	loadingMessage   string
 }
 
 // NewNamespaceView creates a new namespace selector view
@@ -47,6 +49,48 @@ func NewNamespaceView(namespaces []v1.Namespace, currentNamespace string) *Names
 	}
 
 	return nv
+}
+
+// NewNamespaceViewWithLoading creates a new namespace selector view in loading state
+func NewNamespaceViewWithLoading(currentNamespace string, loadingMessage string) *NamespaceView {
+	return &NamespaceView{
+		namespaces:       []v1.Namespace{},
+		filteredItems:    []v1.Namespace{},
+		currentNamespace: currentNamespace,
+		loading:          true,
+		loadingMessage:   loadingMessage,
+	}
+}
+
+// SetLoading sets the loading state
+func (v *NamespaceView) SetLoading(loading bool, message string) {
+	v.loading = loading
+	v.loadingMessage = message
+}
+
+// SetNamespaces updates the namespaces and clears loading state
+func (v *NamespaceView) SetNamespaces(namespaces []v1.Namespace) {
+	v.loading = false
+	v.loadingMessage = ""
+	v.namespaces = namespaces
+
+	// Add "all" option at the beginning
+	allNs := v1.Namespace{}
+	allNs.Name = "all"
+	v.namespaces = append([]v1.Namespace{allNs}, namespaces...)
+	v.filteredItems = v.namespaces
+
+	// Pre-select the current namespace
+	if v.currentNamespace == "" || v.currentNamespace == "all" {
+		v.selectedIndex = 0
+	} else {
+		for i, ns := range v.namespaces {
+			if ns.Name == v.currentNamespace {
+				v.selectedIndex = i
+				break
+			}
+		}
+	}
 }
 
 // Init initializes the view
@@ -152,6 +196,36 @@ func (v *NamespaceView) View() string {
 	title := "Select Namespace"
 	content.WriteString(titleStyle.Render(title))
 	content.WriteString("\n\n")
+
+	// Show loading state
+	if v.loading {
+		loadingStyle := lipgloss.NewStyle().
+			Foreground(lipgloss.Color("11")).
+			Bold(true)
+
+		spinnerStyle := lipgloss.NewStyle().
+			Foreground(lipgloss.Color("12"))
+
+		message := v.loadingMessage
+		if message == "" {
+			message = "Loading namespaces..."
+		}
+
+		content.WriteString(loadingStyle.Render(message))
+		content.WriteString("\n\n")
+		content.WriteString(spinnerStyle.Render("⠋ Fetching from contexts..."))
+		content.WriteString("\n\n")
+		content.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Render("Please wait..."))
+
+		// Center the popup
+		return lipgloss.Place(
+			v.width,
+			v.height,
+			lipgloss.Center,
+			lipgloss.Center,
+			borderStyle.Render(content.String()),
+		)
+	}
 
 	// Show filter if active
 	if v.filter != "" {

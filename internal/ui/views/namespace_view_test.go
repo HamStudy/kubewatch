@@ -6,6 +6,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	v1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 func createNamespace(name string) v1.Namespace {
@@ -581,4 +582,105 @@ func TestNamespaceViewEdgeCases(t *testing.T) {
 			tt.validate(t, view)
 		})
 	}
+}
+
+// TestNamespaceViewLoading tests the loading state functionality
+func TestNamespaceViewLoading(t *testing.T) {
+	t.Run("creates loading view", func(t *testing.T) {
+		view := NewNamespaceViewWithLoading("default", "Loading namespaces from 3 contexts...")
+
+		if !view.loading {
+			t.Error("Expected loading to be true")
+		}
+
+		if view.loadingMessage != "Loading namespaces from 3 contexts..." {
+			t.Errorf("Expected loading message 'Loading namespaces from 3 contexts...', got '%s'", view.loadingMessage)
+		}
+
+		if view.currentNamespace != "default" {
+			t.Errorf("Expected current namespace 'default', got '%s'", view.currentNamespace)
+		}
+	})
+
+	t.Run("shows loading in view", func(t *testing.T) {
+		view := NewNamespaceViewWithLoading("default", "Loading namespaces...")
+		view.SetSize(80, 24)
+
+		output := view.View()
+
+		if !strings.Contains(output, "Loading namespaces...") {
+			t.Error("Expected loading message in view output")
+		}
+
+		if !strings.Contains(output, "Fetching from contexts...") {
+			t.Error("Expected fetching message in view output")
+		}
+
+		if !strings.Contains(output, "Please wait...") {
+			t.Error("Expected wait message in view output")
+		}
+	})
+
+	t.Run("sets loading state", func(t *testing.T) {
+		view := NewNamespaceView([]v1.Namespace{}, "default")
+
+		// Initially not loading
+		if view.loading {
+			t.Error("Expected loading to be false initially")
+		}
+
+		// Set loading
+		view.SetLoading(true, "Loading...")
+		if !view.loading {
+			t.Error("Expected loading to be true after SetLoading(true)")
+		}
+		if view.loadingMessage != "Loading..." {
+			t.Errorf("Expected loading message 'Loading...', got '%s'", view.loadingMessage)
+		}
+
+		// Clear loading
+		view.SetLoading(false, "")
+		if view.loading {
+			t.Error("Expected loading to be false after SetLoading(false)")
+		}
+		if view.loadingMessage != "" {
+			t.Errorf("Expected empty loading message, got '%s'", view.loadingMessage)
+		}
+	})
+
+	t.Run("sets namespaces and clears loading", func(t *testing.T) {
+		view := NewNamespaceViewWithLoading("production", "Loading...")
+
+		// Initially loading
+		if !view.loading {
+			t.Error("Expected loading to be true initially")
+		}
+
+		// Set namespaces
+		namespaces := []v1.Namespace{
+			{ObjectMeta: metav1.ObjectMeta{Name: "default"}},
+			{ObjectMeta: metav1.ObjectMeta{Name: "production"}},
+			{ObjectMeta: metav1.ObjectMeta{Name: "staging"}},
+		}
+
+		view.SetNamespaces(namespaces)
+
+		// Should clear loading
+		if view.loading {
+			t.Error("Expected loading to be false after SetNamespaces")
+		}
+		if view.loadingMessage != "" {
+			t.Errorf("Expected empty loading message, got '%s'", view.loadingMessage)
+		}
+
+		// Should have namespaces plus "all" option
+		if len(view.namespaces) != 4 { // 3 + "all"
+			t.Errorf("Expected 4 namespaces (including 'all'), got %d", len(view.namespaces))
+		}
+
+		// Should select current namespace
+		if view.selectedIndex != 2 { // "all", "default", "production" (index 2)
+			t.Errorf("Expected selectedIndex 2 for 'production', got %d", view.selectedIndex)
+		}
+	})
 }

@@ -77,6 +77,7 @@ type ResourceCache struct {
 	secrets      map[string]*CacheEntry
 	statefulsets map[string]*CacheEntry
 	ingresses    map[string]*CacheEntry
+	namespaces   map[string]*CacheEntry
 
 	maxSize int
 	ttl     time.Duration
@@ -98,6 +99,7 @@ func NewResourceCache(maxSize int, ttl time.Duration) *ResourceCache {
 		secrets:      make(map[string]*CacheEntry),
 		statefulsets: make(map[string]*CacheEntry),
 		ingresses:    make(map[string]*CacheEntry),
+		namespaces:   make(map[string]*CacheEntry),
 		maxSize:      maxSize,
 		ttl:          ttl,
 		metrics:      &CacheMetrics{},
@@ -147,6 +149,7 @@ func (c *ResourceCache) removeFromAllCaches(key string) {
 	delete(c.secrets, key)
 	delete(c.statefulsets, key)
 	delete(c.ingresses, key)
+	delete(c.namespaces, key)
 
 	// Remove from access tracking
 	delete(c.accessMap, key)
@@ -176,7 +179,7 @@ func (c *ResourceCache) updateAccess(key string) {
 // ensureCapacity ensures cache doesn't exceed max size
 func (c *ResourceCache) ensureCapacity() {
 	totalEntries := len(c.pods) + len(c.deployments) + len(c.services) +
-		len(c.configmaps) + len(c.secrets) + len(c.statefulsets) + len(c.ingresses)
+		len(c.configmaps) + len(c.secrets) + len(c.statefulsets) + len(c.ingresses) + len(c.namespaces)
 
 	for totalEntries >= c.maxSize {
 		c.evictLRU()
@@ -466,6 +469,46 @@ func (c *ResourceCache) SetIngresses(namespace string, ingresses []networkingv1.
 	c.updateAccess(key)
 }
 
+// GetNamespaces retrieves cached namespaces
+func (c *ResourceCache) GetNamespaces(contextName string) ([]v1.Namespace, bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	key := c.generateKey("namespaces", contextName, "*")
+	entry, exists := c.namespaces[key]
+
+	if !exists || c.isExpired(entry) {
+		c.metrics.RecordMiss()
+		return nil, false
+	}
+
+	c.updateAccess(key)
+	c.metrics.RecordHit()
+
+	if namespaces, ok := entry.Data.([]v1.Namespace); ok {
+		return namespaces, true
+	}
+
+	return nil, false
+}
+
+// SetNamespaces caches namespaces for a context
+func (c *ResourceCache) SetNamespaces(contextName string, namespaces []v1.Namespace, resourceVersion string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.ensureCapacity()
+
+	key := c.generateKey("namespaces", contextName, "*")
+	c.namespaces[key] = &CacheEntry{
+		Data:      namespaces,
+		Timestamp: time.Now(),
+		Version:   resourceVersion,
+	}
+
+	c.updateAccess(key)
+}
+
 // InvalidateNamespace removes all cached entries for a namespace
 func (c *ResourceCache) InvalidateNamespace(namespace string) {
 	c.mu.Lock()
@@ -542,6 +585,7 @@ func (c *ResourceCache) Clear() {
 	c.secrets = make(map[string]*CacheEntry)
 	c.statefulsets = make(map[string]*CacheEntry)
 	c.ingresses = make(map[string]*CacheEntry)
+	c.namespaces = make(map[string]*CacheEntry)
 
 	c.accessOrder = make([]string, 0)
 	c.accessMap = make(map[string]time.Time)
@@ -600,6 +644,12 @@ func (c *ResourceCache) CleanupExpired() {
 	}
 
 	for key, entry := range c.ingresses {
+		if now.Sub(entry.Timestamp) > c.ttl {
+			keysToRemove = append(keysToRemove, key)
+		}
+	}
+
+	for key, entry := range c.namespaces {
 		if now.Sub(entry.Timestamp) > c.ttl {
 			keysToRemove = append(keysToRemove, key)
 		}

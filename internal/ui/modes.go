@@ -17,6 +17,7 @@ const (
 	ModeContextSelector
 	ModeNamespaceSelector
 	ModeConfirmDialog
+	ModeResourceSelector
 )
 
 // KeyBinding represents a key binding with help text
@@ -136,12 +137,10 @@ func (m *ListMode) HandleKey(msg tea.KeyMsg, app *App) (bool, tea.Cmd) {
 		return true, app.openContextSelector()
 
 	case key.Matches(msg, bindings["tab"].Key):
-		app.nextResourceType()
-		return true, app.resourceView.RefreshResources()
+		return true, app.openResourceSelector()
 
 	case key.Matches(msg, bindings["shift+tab"].Key):
-		app.prevResourceType()
-		return true, app.resourceView.RefreshResources()
+		return true, app.openResourceSelector()
 
 	case key.Matches(msg, bindings["logs"].Key), key.Matches(msg, bindings["enter"].Key):
 		selectedName := app.resourceView.GetSelectedResourceName()
@@ -318,15 +317,18 @@ func NewDescribeMode() *DescribeMode {
 
 func (m *DescribeMode) GetKeyBindings() map[string]KeyBinding {
 	return map[string]KeyBinding{
-		"up":       NewKeyBinding([]string{"up", "k"}, "↑/k", "Scroll up", "Navigation"),
-		"down":     NewKeyBinding([]string{"down", "j"}, "↓/j", "Scroll down", "Navigation"),
-		"pageup":   NewKeyBinding([]string{"pgup"}, "PgUp", "Page up", "Navigation"),
-		"pagedown": NewKeyBinding([]string{"pgdown"}, "PgDn", "Page down", "Navigation"),
-		"home":     NewKeyBinding([]string{"home", "g"}, "Home/g", "Jump to top", "Navigation"),
-		"end":      NewKeyBinding([]string{"end", "G"}, "End/G", "Jump to bottom", "Navigation"),
-		"help":     NewKeyBinding([]string{"?"}, "?", "Toggle help", "General"),
-		"quit":     NewKeyBinding([]string{"q", "ctrl+c"}, "q", "Quit application", "General"),
-		"escape":   NewKeyBinding([]string{"esc"}, "Esc", "Back to list", "General"),
+		"up":          NewKeyBinding([]string{"up", "k"}, "↑/k", "Scroll up", "Navigation"),
+		"down":        NewKeyBinding([]string{"down", "j"}, "↓/j", "Scroll down", "Navigation"),
+		"pageup":      NewKeyBinding([]string{"pgup"}, "PgUp", "Page up", "Navigation"),
+		"pagedown":    NewKeyBinding([]string{"pgdown"}, "PgDn", "Page down", "Navigation"),
+		"home":        NewKeyBinding([]string{"home", "g"}, "Home/g", "Jump to top", "Navigation"),
+		"end":         NewKeyBinding([]string{"end", "G"}, "End/G", "Jump to bottom", "Navigation"),
+		"wordwrap":    NewKeyBinding([]string{"u"}, "u", "Toggle word wrap", "Display"),
+		"refresh":     NewKeyBinding([]string{"r", "ctrl+r"}, "r", "Manual refresh", "Actions"),
+		"autorefresh": NewKeyBinding([]string{"a"}, "a", "Toggle auto-refresh", "Actions"),
+		"help":        NewKeyBinding([]string{"?"}, "?", "Toggle help", "General"),
+		"quit":        NewKeyBinding([]string{"q", "ctrl+c"}, "q", "Quit application", "General"),
+		"escape":      NewKeyBinding([]string{"esc"}, "Esc", "Back to list", "General"),
 	}
 }
 
@@ -429,6 +431,8 @@ func (m *ContextSelectorMode) GetKeyBindings() map[string]KeyBinding {
 		"down":   NewKeyBinding([]string{"down", "j"}, "↓/j", "Move down", "Navigation"),
 		"space":  NewKeyBinding([]string{" "}, "Space", "Toggle selection", "Actions"),
 		"enter":  NewKeyBinding([]string{"enter"}, "Enter", "Apply selection", "Actions"),
+		"info":   NewKeyBinding([]string{"i"}, "i", "Show context info", "Actions"),
+		"search": NewKeyBinding([]string{"/"}, "/", "Search contexts", "Actions"),
 		"quit":   NewKeyBinding([]string{"q", "ctrl+c"}, "q", "Quit application", "General"),
 		"escape": NewKeyBinding([]string{"esc", "c"}, "Esc/c", "Cancel", "General"),
 	}
@@ -448,6 +452,11 @@ func (m *ContextSelectorMode) GetHelpSections() map[string][]KeyBinding {
 func (m *ContextSelectorMode) HandleKey(msg tea.KeyMsg, app *App) (bool, tea.Cmd) {
 	bindings := m.GetKeyBindings()
 
+	// If context view is in search mode, don't handle any keys here
+	if app.contextView != nil && app.contextView.SearchMode {
+		return false, nil
+	}
+
 	switch {
 	case key.Matches(msg, bindings["quit"].Key):
 		return true, tea.Quit
@@ -458,6 +467,14 @@ func (m *ContextSelectorMode) HandleKey(msg tea.KeyMsg, app *App) (bool, tea.Cmd
 	case key.Matches(msg, bindings["escape"].Key):
 		app.setMode(ModeList)
 		return true, nil
+
+	case key.Matches(msg, bindings["info"].Key):
+		// Let context view handle info key
+		return false, nil
+
+	case key.Matches(msg, bindings["search"].Key):
+		// Let context view handle search key
+		return false, nil
 	}
 
 	// Let context view handle navigation keys
@@ -569,5 +586,61 @@ func (m *ConfirmDialogMode) HandleKey(msg tea.KeyMsg, app *App) (bool, tea.Cmd) 
 	}
 
 	// Let confirm view handle navigation keys
+	return false, nil
+}
+
+// ResourceSelectorMode handles resource type selection
+type ResourceSelectorMode struct {
+	BaseMode
+}
+
+func NewResourceSelectorMode() *ResourceSelectorMode {
+	return &ResourceSelectorMode{
+		BaseMode: BaseMode{
+			modeType: ModeResourceSelector,
+			title:    "KubeWatch TUI - Resource Selector",
+		},
+	}
+}
+
+func (m *ResourceSelectorMode) GetKeyBindings() map[string]KeyBinding {
+	return map[string]KeyBinding{
+		"up":     NewKeyBinding([]string{"up", "k"}, "↑/k", "Move up", "Navigation"),
+		"down":   NewKeyBinding([]string{"down", "j"}, "↓/j", "Move down", "Navigation"),
+		"enter":  NewKeyBinding([]string{"enter"}, "Enter", "Select resource type", "Actions"),
+		"quit":   NewKeyBinding([]string{"q", "ctrl+c"}, "q", "Quit application", "General"),
+		"escape": NewKeyBinding([]string{"esc", "tab"}, "Esc/Tab", "Cancel", "General"),
+	}
+}
+
+func (m *ResourceSelectorMode) GetHelpSections() map[string][]KeyBinding {
+	bindings := m.GetKeyBindings()
+	sections := make(map[string][]KeyBinding)
+
+	for _, binding := range bindings {
+		sections[binding.Section] = append(sections[binding.Section], binding)
+	}
+
+	return sections
+}
+
+func (m *ResourceSelectorMode) HandleKey(msg tea.KeyMsg, app *App) (bool, tea.Cmd) {
+	bindings := m.GetKeyBindings()
+
+	switch {
+	case key.Matches(msg, bindings["quit"].Key):
+		return true, tea.Quit
+
+	case key.Matches(msg, bindings["enter"].Key):
+		// Resource selection not implemented yet
+		app.setMode(ModeList)
+		return true, nil
+
+	case key.Matches(msg, bindings["escape"].Key):
+		app.setMode(ModeList)
+		return true, nil
+	}
+
+	// Let resource selector view handle navigation keys
 	return false, nil
 }

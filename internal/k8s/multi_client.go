@@ -232,6 +232,85 @@ type StatefulSetWithContext struct {
 	StatefulSet appsv1.StatefulSet
 }
 
+// NamespaceWithContext wraps a namespace with its context
+type NamespaceWithContext struct {
+	Context   string
+	Namespace v1.Namespace
+}
+
+// ListNamespacesAllContexts returns namespaces from all contexts with context information
+func (mc *MultiContextClient) ListNamespacesAllContexts(ctx context.Context) ([]NamespaceWithContext, error) {
+	var allNamespaces []NamespaceWithContext
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	errChan := make(chan error, len(mc.contexts))
+
+	for _, contextName := range mc.contexts {
+		wg.Add(1)
+		go func(ctxName string) {
+			defer wg.Done()
+
+			client, err := mc.GetClient(ctxName)
+			if err != nil {
+				errChan <- fmt.Errorf("context %s: %w", ctxName, err)
+				return
+			}
+
+			namespaces, err := client.ListNamespaces(ctx)
+			if err != nil {
+				errChan <- fmt.Errorf("context %s: %w", ctxName, err)
+				return
+			}
+
+			mu.Lock()
+			for _, namespace := range namespaces {
+				allNamespaces = append(allNamespaces, NamespaceWithContext{
+					Context:   ctxName,
+					Namespace: namespace,
+				})
+			}
+			mu.Unlock()
+		}(contextName)
+	}
+
+	wg.Wait()
+	close(errChan)
+
+	// Check for errors
+	var errs []error
+	for err := range errChan {
+		errs = append(errs, err)
+	}
+	if len(errs) > 0 {
+		// Return partial results with error
+		return allNamespaces, fmt.Errorf("errors from %d contexts: %v", len(errs), errs)
+	}
+
+	return allNamespaces, nil
+}
+
+// GetUniqueNamespaces returns unique namespace names from all contexts
+func (mc *MultiContextClient) GetUniqueNamespaces(ctx context.Context) ([]v1.Namespace, error) {
+	namespacesWithContext, err := mc.ListNamespacesAllContexts(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	// Create a map to deduplicate namespaces by name
+	uniqueNamespaces := make(map[string]v1.Namespace)
+	for _, nsWithCtx := range namespacesWithContext {
+		uniqueNamespaces[nsWithCtx.Namespace.Name] = nsWithCtx.Namespace
+	}
+
+	// Convert back to slice
+	var result []v1.Namespace
+	for _, ns := range uniqueNamespaces {
+		result = append(result, ns)
+	}
+
+	return result, nil
+}
+
 // GetAvailableContexts returns all available contexts from kubeconfig
 func GetAvailableContexts() ([]string, string, error) {
 	loadingRules := clientcmd.NewDefaultClientConfigLoadingRules()

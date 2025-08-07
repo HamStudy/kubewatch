@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	v1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/tools/clientcmd"
 )
 
@@ -508,6 +509,177 @@ func (emc *EnhancedMultiContextClient) AddWatchListener(ctx context.Context, nam
 // RemoveWatchListener removes a watch listener
 func (emc *EnhancedMultiContextClient) RemoveWatchListener(contextName, namespace, resource string, listener <-chan WatchEvent) {
 	emc.watchManager.RemoveWatchListener(contextName, namespace, resource, listener)
+}
+
+// ListNamespacesAllContextsOptimized returns namespaces from all contexts with caching and parallel fetching
+func (emc *EnhancedMultiContextClient) ListNamespacesAllContextsOptimized(ctx context.Context) ([]NamespaceWithContext, error) {
+	if !emc.parallelFetch {
+		return emc.listNamespacesSequential(ctx)
+	}
+
+	return emc.listNamespacesParallel(ctx)
+}
+
+// listNamespacesParallel fetches namespaces from all contexts in parallel
+func (emc *EnhancedMultiContextClient) listNamespacesParallel(ctx context.Context) ([]NamespaceWithContext, error) {
+	type result struct {
+		namespaces []NamespaceWithContext
+		err        error
+	}
+
+	resultChan := make(chan result, len(emc.contexts))
+	var wg sync.WaitGroup
+
+	for _, contextName := range emc.contexts {
+		wg.Add(1)
+		go func(ctxName string) {
+			defer wg.Done()
+
+			// Check cache first
+			if cachedNamespaces, found := emc.cache.GetNamespaces(ctxName); found {
+				namespaces := make([]NamespaceWithContext, len(cachedNamespaces))
+				for i, namespace := range cachedNamespaces {
+					namespaces[i] = NamespaceWithContext{
+						Context:   ctxName,
+						Namespace: namespace,
+					}
+				}
+				resultChan <- result{namespaces: namespaces, err: nil}
+				return
+			}
+
+			client, err := emc.GetClient(ctxName)
+			if err != nil {
+				resultChan <- result{err: fmt.Errorf("context %s: %w", ctxName, err)}
+				return
+			}
+
+			// Create timeout context for this operation
+			fetchCtx, cancel := context.WithTimeout(ctx, emc.contextTimeout)
+			defer cancel()
+
+			namespaces, err := client.ListNamespaces(fetchCtx)
+			if err != nil {
+				resultChan <- result{err: fmt.Errorf("context %s: %w", ctxName, err)}
+				return
+			}
+
+			// Cache the results
+			emc.cache.SetNamespaces(ctxName, namespaces, "")
+
+			// Convert to NamespaceWithContext
+			namespacesWithContext := make([]NamespaceWithContext, len(namespaces))
+			for i, namespace := range namespaces {
+				namespacesWithContext[i] = NamespaceWithContext{
+					Context:   ctxName,
+					Namespace: namespace,
+				}
+			}
+
+			resultChan <- result{namespaces: namespacesWithContext, err: nil}
+		}(contextName)
+	}
+
+	// Wait for all goroutines to complete
+	go func() {
+		wg.Wait()
+		close(resultChan)
+	}()
+
+	// Collect results
+	var allNamespaces []NamespaceWithContext
+	var errors []error
+
+	for res := range resultChan {
+		if res.err != nil {
+			errors = append(errors, res.err)
+		} else {
+			allNamespaces = append(allNamespaces, res.namespaces...)
+		}
+	}
+
+	// Return partial results even if some contexts failed
+	var err error
+	if len(errors) > 0 {
+		err = fmt.Errorf("errors from %d contexts: %v", len(errors), errors)
+	}
+
+	return allNamespaces, err
+}
+
+// listNamespacesSequential fetches namespaces from contexts sequentially
+func (emc *EnhancedMultiContextClient) listNamespacesSequential(ctx context.Context) ([]NamespaceWithContext, error) {
+	var allNamespaces []NamespaceWithContext
+	var errors []error
+
+	for _, contextName := range emc.contexts {
+		// Check cache first
+		if cachedNamespaces, found := emc.cache.GetNamespaces(contextName); found {
+			for _, namespace := range cachedNamespaces {
+				allNamespaces = append(allNamespaces, NamespaceWithContext{
+					Context:   contextName,
+					Namespace: namespace,
+				})
+			}
+			continue
+		}
+
+		client, err := emc.GetClient(contextName)
+		if err != nil {
+			errors = append(errors, fmt.Errorf("context %s: %w", contextName, err))
+			continue
+		}
+
+		// Create timeout context for this operation
+		fetchCtx, cancel := context.WithTimeout(ctx, emc.contextTimeout)
+
+		namespaces, err := client.ListNamespaces(fetchCtx)
+		cancel()
+
+		if err != nil {
+			errors = append(errors, fmt.Errorf("context %s: %w", contextName, err))
+			continue
+		}
+
+		// Cache the results
+		emc.cache.SetNamespaces(contextName, namespaces, "")
+
+		for _, namespace := range namespaces {
+			allNamespaces = append(allNamespaces, NamespaceWithContext{
+				Context:   contextName,
+				Namespace: namespace,
+			})
+		}
+	}
+
+	var err error
+	if len(errors) > 0 {
+		err = fmt.Errorf("errors from %d contexts: %v", len(errors), errors)
+	}
+
+	return allNamespaces, err
+}
+
+// GetUniqueNamespacesOptimized returns unique namespace names from all contexts with optimizations
+func (emc *EnhancedMultiContextClient) GetUniqueNamespacesOptimized(ctx context.Context) ([]v1.Namespace, error) {
+	namespacesWithContext, err := emc.ListNamespacesAllContextsOptimized(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	// Create a map to deduplicate namespaces by name
+	uniqueNamespaces := make(map[string]v1.Namespace)
+	for _, nsWithCtx := range namespacesWithContext {
+		uniqueNamespaces[nsWithCtx.Namespace.Name] = nsWithCtx.Namespace
+	}
+
+	// Convert back to slice
+	var result []v1.Namespace
+	for _, ns := range uniqueNamespaces {
+		result = append(result, ns)
+	}
+
+	return result, nil
 }
 
 // Close cleans up resources

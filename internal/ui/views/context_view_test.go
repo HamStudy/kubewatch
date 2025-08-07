@@ -341,7 +341,7 @@ func TestContextViewSearchMode(t *testing.T) {
 	model, _ := view.Update(msg)
 	view = model.(*ContextView)
 
-	if !view.searchMode {
+	if !view.SearchMode {
 		t.Error("should be in search mode after pressing /")
 	}
 
@@ -368,7 +368,7 @@ func TestContextViewSearchMode(t *testing.T) {
 	model, _ = view.Update(msg)
 	view = model.(*ContextView)
 
-	if view.searchMode {
+	if view.SearchMode {
 		t.Error("should exit search mode after pressing ESC")
 	}
 
@@ -381,7 +381,7 @@ func TestContextViewSearchMode(t *testing.T) {
 	model, _ = view.Update(msg)
 	view = model.(*ContextView)
 
-	if view.searchMode {
+	if view.SearchMode {
 		t.Error("should exit search mode after pressing Enter")
 	}
 }
@@ -437,7 +437,7 @@ func TestContextViewRendering(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			view := NewContextView(tt.contexts, tt.selected)
 			view.multiSelect = tt.multiSelect
-			view.searchMode = tt.searchMode
+			view.SearchMode = tt.searchMode
 			view.searchQuery = tt.searchQuery
 			view.SetSize(80, 24)
 

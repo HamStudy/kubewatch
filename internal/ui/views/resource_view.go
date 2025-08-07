@@ -1275,6 +1275,8 @@ func (v *ResourceView) updateColumnsForResourceType() {
 }
 
 func (v *ResourceView) updateTableWithPods(pods []v1.Pod) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
 	// Update columns for pods
 	v.updateColumnsForResourceType()
 
@@ -1399,6 +1401,8 @@ func (v *ResourceView) updateTableWithPods(pods []v1.Pod) {
 }
 
 func (v *ResourceView) updateTableWithDeployments(deployments []appsv1.Deployment) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
 	// Update columns for deployments
 	v.updateColumnsForResourceType()
 
@@ -1473,6 +1477,8 @@ func (v *ResourceView) updateTableWithDeployments(deployments []appsv1.Deploymen
 }
 
 func (v *ResourceView) updateTableWithStatefulSets(statefulsets []appsv1.StatefulSet) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
 	// Update columns for statefulsets
 	v.updateColumnsForResourceType()
 
@@ -1538,6 +1544,8 @@ func (v *ResourceView) updateTableWithStatefulSets(statefulsets []appsv1.Statefu
 }
 
 func (v *ResourceView) updateTableWithServices(services []v1.Service) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
 	// Update columns for services
 	v.updateColumnsForResourceType()
 
@@ -1633,6 +1641,8 @@ func (v *ResourceView) updateTableWithServices(services []v1.Service) {
 }
 
 func (v *ResourceView) updateTableWithIngresses(ingresses []networkingv1.Ingress) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
 	// Update columns for ingresses
 	v.updateColumnsForResourceType()
 
@@ -1715,6 +1725,8 @@ func (v *ResourceView) updateTableWithIngresses(ingresses []networkingv1.Ingress
 }
 
 func (v *ResourceView) updateTableWithConfigMaps(configmaps []v1.ConfigMap) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
 	// Update columns for configmaps
 	v.updateColumnsForResourceType()
 
@@ -1766,6 +1778,8 @@ func (v *ResourceView) updateTableWithConfigMaps(configmaps []v1.ConfigMap) {
 }
 
 func (v *ResourceView) updateTableWithSecrets(secrets []v1.Secret) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
 	// Update columns for secrets
 	v.updateColumnsForResourceType()
 
@@ -2228,6 +2242,8 @@ func (v *ResourceView) updateTableWithPodsMultiContext(podsWithContext []k8s.Pod
 }
 
 func (v *ResourceView) updateTableWithDeploymentsMultiContext(deploymentsWithContext []k8s.DeploymentWithContext) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
 	// Update columns for deployments with context column
 	v.updateColumnsForResourceType()
 
@@ -2430,6 +2446,8 @@ func (v *ResourceView) SetSelectedRow(row int) {
 
 // updateTableWithNewComponents uses the new refactored components to update the table
 func (rv *ResourceView) updateTableWithNewComponents(resources []interface{}) error {
+	rv.mu.Lock()
+	defer rv.mu.Unlock()
 	if rv.transformerRegistry == nil || rv.templateEngine == nil {
 		// Fall back to legacy method if new components aren't initialized
 		return fmt.Errorf("new components not initialized")

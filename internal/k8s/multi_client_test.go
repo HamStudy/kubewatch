@@ -762,3 +762,123 @@ func isContextError(err error) bool {
 func isClientError(err error) bool {
 	return err != nil && strings.Contains(err.Error(), "client")
 }
+
+// TestMultiContextClientNamespaces tests namespace listing functionality
+func TestMultiContextClientNamespaces(t *testing.T) {
+	// Create fake clients
+	fakeClient1 := fake.NewSimpleClientset()
+	fakeClient2 := fake.NewSimpleClientset()
+
+	// Add namespaces to context1
+	ns1 := &v1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "default",
+		},
+	}
+	ns2 := &v1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "kube-system",
+		},
+	}
+	ns3 := &v1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "production",
+		},
+	}
+	fakeClient1.CoreV1().Namespaces().Create(context.Background(), ns1, metav1.CreateOptions{})
+	fakeClient1.CoreV1().Namespaces().Create(context.Background(), ns2, metav1.CreateOptions{})
+	fakeClient1.CoreV1().Namespaces().Create(context.Background(), ns3, metav1.CreateOptions{})
+
+	// Add namespaces to context2 (some overlap, some unique)
+	ns4 := &v1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "default", // Duplicate
+		},
+	}
+	ns5 := &v1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "staging", // Unique to context2
+		},
+	}
+	ns6 := &v1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "development", // Unique to context2
+		},
+	}
+	fakeClient2.CoreV1().Namespaces().Create(context.Background(), ns4, metav1.CreateOptions{})
+	fakeClient2.CoreV1().Namespaces().Create(context.Background(), ns5, metav1.CreateOptions{})
+	fakeClient2.CoreV1().Namespaces().Create(context.Background(), ns6, metav1.CreateOptions{})
+
+	mc := &MultiContextClient{
+		contexts: []string{"context1", "context2"},
+		clients: map[string]*Client{
+			"context1": {clientset: fakeClient1},
+			"context2": {clientset: fakeClient2},
+		},
+	}
+
+	t.Run("ListNamespacesAllContexts", func(t *testing.T) {
+		namespacesWithContext, err := mc.ListNamespacesAllContexts(context.Background())
+		if err != nil && !strings.Contains(err.Error(), "errors from") {
+			t.Errorf("Unexpected error: %v", err)
+		}
+
+		// Should have 6 total namespaces (3 from each context)
+		if len(namespacesWithContext) != 6 {
+			t.Errorf("Expected 6 namespaces with context, got %d", len(namespacesWithContext))
+		}
+
+		// Verify context information
+		contextCounts := make(map[string]int)
+		namespaceNames := make(map[string]bool)
+		for _, nsWithCtx := range namespacesWithContext {
+			contextCounts[nsWithCtx.Context]++
+			namespaceNames[nsWithCtx.Namespace.Name] = true
+		}
+
+		if contextCounts["context1"] != 3 {
+			t.Errorf("Expected 3 namespaces from context1, got %d", contextCounts["context1"])
+		}
+		if contextCounts["context2"] != 3 {
+			t.Errorf("Expected 3 namespaces from context2, got %d", contextCounts["context2"])
+		}
+
+		// Verify all expected namespace names are present
+		expectedNames := []string{"default", "kube-system", "production", "staging", "development"}
+		for _, name := range expectedNames {
+			if !namespaceNames[name] {
+				t.Errorf("Expected namespace %s not found", name)
+			}
+		}
+	})
+
+	t.Run("GetUniqueNamespaces", func(t *testing.T) {
+		uniqueNamespaces, err := mc.GetUniqueNamespaces(context.Background())
+		if err != nil && !strings.Contains(err.Error(), "errors from") {
+			t.Errorf("Unexpected error: %v", err)
+		}
+
+		// Should have 5 unique namespaces (default appears in both contexts but should be deduplicated)
+		if len(uniqueNamespaces) != 5 {
+			t.Errorf("Expected 5 unique namespaces, got %d", len(uniqueNamespaces))
+		}
+
+		// Verify all expected unique namespace names are present
+		namespaceNames := make(map[string]bool)
+		for _, ns := range uniqueNamespaces {
+			namespaceNames[ns.Name] = true
+		}
+
+		expectedNames := []string{"default", "kube-system", "production", "staging", "development"}
+		for _, name := range expectedNames {
+			if !namespaceNames[name] {
+				t.Errorf("Expected unique namespace %s not found", name)
+			}
+		}
+
+		// Verify no duplicates
+		if len(namespaceNames) != len(uniqueNamespaces) {
+			t.Errorf("Duplicate namespaces found in unique list")
+		}
+	})
+}
