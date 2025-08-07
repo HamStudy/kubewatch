@@ -1,0 +1,288 @@
+apiVersion: kubewatch.io/v1
+kind: ResourceDefinition
+metadata:
+  name: ingress
+  description: Kubernetes Ingress resource
+  icon: 
+spec:
+  # Kubernetes API information
+  kubernetes:
+    group: networking.k8s.io
+    version: v1
+    kind: Ingress
+    plural: ingresses
+    namespaced: true
+    
+  # Column definitions for table display
+  columns:
+    - name: NAME
+      width: 30
+      priority: 1
+      template: "{{ .metadata.name }}"
+      sortable: true
+      
+    - name: NAMESPACE
+      width: 20
+      priority: 2
+      condition: "showNamespace"
+      template: |
+        {{- if hasPrefix .metadata.namespace "kube-" -}}
+          {{- color "blue" .metadata.namespace -}}
+        {{- else if eq .metadata.namespace "default" -}}
+          {{- color "gray" .metadata.namespace -}}
+        {{- else -}}
+          {{- .metadata.namespace -}}
+        {{- end -}}
+      sortable: true
+      
+    - name: CLASS
+      width: 15
+      priority: 1
+      template: |
+        {{- if .spec.ingressClassName -}}
+          {{- if eq .spec.ingressClassName "nginx" -}}
+            {{- color "green" .spec.ingressClassName -}}
+          {{- else if eq .spec.ingressClassName "traefik" -}}
+            {{- color "cyan" .spec.ingressClassName -}}
+          {{- else if eq .spec.ingressClassName "alb" -}}
+            {{- color "yellow" .spec.ingressClassName -}}
+          {{- else if eq .spec.ingressClassName "gce" -}}
+            {{- color "blue" .spec.ingressClassName -}}
+          {{- else -}}
+            {{- .spec.ingressClassName -}}
+          {{- end -}}
+        {{- else -}}
+          {{- color "gray" "<none>" -}}
+        {{- end -}}
+      sortable: true
+      
+    - name: HOSTS
+      width: 40
+      priority: 1
+      template: |
+        {{- $hosts := list -}}
+        {{- range .spec.rules -}}
+          {{- if .host -}}
+            {{- $hosts = append $hosts .host -}}
+          {{- else -}}
+            {{- $hosts = append $hosts "*" -}}
+          {{- end -}}
+        {{- end -}}
+        
+        {{- if $hosts -}}
+          {{- if gt (len $hosts) 3 -}}
+            {{- printf "%s... (%d hosts)" (join (slice $hosts 0 3) ",") (len $hosts) -}}
+          {{- else -}}
+            {{- join $hosts "," -}}
+          {{- end -}}
+        {{- else -}}
+          {{- color "gray" "<none>" -}}
+        {{- end -}}
+      sortable: false
+      
+    - name: ADDRESS
+      width: 30
+      priority: 1
+      template: |
+        {{- $addresses := list -}}
+        {{- range .status.loadBalancer.ingress -}}
+          {{- if .ip -}}
+            {{- $addresses = append $addresses .ip -}}
+          {{- else if .hostname -}}
+            {{- /* Shorten long hostnames */ -}}
+            {{- $host := .hostname -}}
+            {{- if gt (len $host) 30 -}}
+              {{- $host = printf "%s..." (slice $host 0 27) -}}
+            {{- end -}}
+            {{- $addresses = append $addresses $host -}}
+          {{- end -}}
+        {{- end -}}
+        
+        {{- if $addresses -}}
+          {{- if gt (len $addresses) 2 -}}
+            {{- printf "%s..." (join (slice $addresses 0 2) ",") -}}
+          {{- else -}}
+            {{- join $addresses "," -}}
+          {{- end -}}
+        {{- else -}}
+          {{- color "gray" "<pending>" -}}
+        {{- end -}}
+      sortable: true
+      
+    - name: PORTS
+      width: 12
+      priority: 1
+      align: center
+      template: |
+        {{- $hasTLS := false -}}
+        {{- if .spec.tls -}}
+          {{- if gt (len .spec.tls) 0 -}}
+            {{- $hasTLS = true -}}
+          {{- end -}}
+        {{- end -}}
+        
+        {{- if $hasTLS -}}
+          {{- color "green" "80, 443" -}}
+        {{- else -}}
+          {{- color "yellow" "80" -}}
+        {{- end -}}
+      sortable: true
+      
+    - name: AGE
+      width: 10
+      priority: 1
+      template: |
+        {{- $age := .metadata.creationTimestamp | ago -}}
+        {{- $ageSeconds := .metadata.creationTimestamp | ageInSeconds -}}
+        
+        {{- if lt $ageSeconds 300 -}}
+          {{- color "cyan" $age -}}
+        {{- else if lt $ageSeconds 3600 -}}
+          {{- color "green" $age -}}
+        {{- else if lt $ageSeconds 86400 -}}
+          {{- color "white" $age -}}
+        {{- else -}}
+          {{- color "gray" $age -}}
+        {{- end -}}
+      sortable: true
+      sortKey: "creationTimestamp"
+      
+    - name: TLS
+      width: 8
+      priority: 2
+      align: center
+      template: |
+        {{- $tlsCount := 0 -}}
+        {{- if .spec.tls -}}
+          {{- $tlsCount = len .spec.tls -}}
+        {{- end -}}
+        
+        {{- if eq $tlsCount 0 -}}
+          {{- color "gray" "✗" -}}
+        {{- else if eq $tlsCount 1 -}}
+          {{- color "green" "🔒" -}}
+        {{- else -}}
+          {{- color "green" (printf "🔒×%d" $tlsCount) -}}
+        {{- end -}}
+      sortable: true
+      sortKey: "tlsCount"
+      
+    - name: BACKENDS
+      width: 40
+      priority: 3
+      template: |
+        {{- $backends := list -}}
+        {{- range .spec.rules -}}
+          {{- if .http -}}
+            {{- range .http.paths -}}
+              {{- $backend := "" -}}
+              {{- if .backend.service -}}
+                {{- $port := "" -}}
+                {{- if .backend.service.port.number -}}
+                  {{- $port = toString .backend.service.port.number -}}
+                {{- else if .backend.service.port.name -}}
+                  {{- $port = .backend.service.port.name -}}
+                {{- end -}}
+                {{- $backend = printf "%s:%s" .backend.service.name $port -}}
+              {{- else if .backend.resource -}}
+                {{- $backend = printf "%s/%s" .backend.resource.kind .backend.resource.name -}}
+              {{- end -}}
+              {{- if $backend -}}
+                {{- $backends = append $backends $backend -}}
+              {{- end -}}
+            {{- end -}}
+          {{- end -}}
+        {{- end -}}
+        
+        {{- if $backends -}}
+          {{- /* Deduplicate backends */ -}}
+          {{- $uniqueBackends := list -}}
+          {{- range $backends -}}
+            {{- if not (has . $uniqueBackends) -}}
+              {{- $uniqueBackends = append $uniqueBackends . -}}
+            {{- end -}}
+          {{- end -}}
+          
+          {{- if gt (len $uniqueBackends) 3 -}}
+            {{- printf "%s... (%d backends)" (join (slice $uniqueBackends 0 3) ",") (len $uniqueBackends) -}}
+          {{- else -}}
+            {{- join $uniqueBackends "," -}}
+          {{- end -}}
+        {{- else -}}
+          {{- color "gray" "<none>" -}}
+        {{- end -}}
+      sortable: false
+      
+  # Operations available for this resource
+  operations:
+    - name: describe
+      key: "d"
+      description: "Describe ingress"
+      command: "kubectl describe ingress {{ .metadata.name }} -n {{ .metadata.namespace }}"
+      
+    - name: edit
+      key: "E"
+      description: "Edit ingress"
+      command: "kubectl edit ingress {{ .metadata.name }} -n {{ .metadata.namespace }}"
+      
+    - name: delete
+      key: "x"
+      description: "Delete ingress"
+      confirm: true
+      confirmMessage: "Delete ingress {{ .metadata.name }}?"
+      command: "kubectl delete ingress {{ .metadata.name }} -n {{ .metadata.namespace }}"
+      
+    - name: view-tls
+      key: "t"
+      description: "View TLS configuration"
+      command: "kubectl get ingress {{ .metadata.name }} -n {{ .metadata.namespace }} -o jsonpath='{.spec.tls[*]}' | jq"
+      
+    - name: test-endpoint
+      key: "T"
+      description: "Test ingress endpoint"
+      command: |
+        {{- $host := "" -}}
+        {{- if .spec.rules -}}
+          {{- if index .spec.rules 0 -}}
+            {{- $host = (index .spec.rules 0).host -}}
+          {{- end -}}
+        {{- end -}}
+        {{- if $host -}}
+          curl -I https://{{ $host }}
+        {{- else -}}
+          echo "No host configured"
+        {{- end -}}
+      interactive: true
+      
+  # Grouping configuration
+  grouping:
+    enabled: true
+    groupBy:
+      - field: ".spec.ingressClassName"
+        name: "Ingress Class"
+        icon: "🌐"
+      - field: ".metadata.labels.app"
+        name: "Application"
+        icon: "📦"
+    aggregations:
+      - column: "HOSTS"
+        function: "count"
+        format: "{{ . }} total hosts"
+      - column: "TLS"
+        function: "count"
+        format: "{{ . }} with TLS"
+        
+  # Filtering options
+  filters:
+    - name: "With TLS"
+      key: "t"
+      condition: '.spec.tls != null and (len .spec.tls) > 0'
+    - name: "Without TLS"
+      key: "n"
+      condition: '.spec.tls == null or (len .spec.tls) == 0'
+    - name: "Has Address"
+      key: "a"
+      condition: '.status.loadBalancer.ingress != null and (len .status.loadBalancer.ingress) > 0'
+    - name: "Pending"
+      key: "p"
+      condition: '.status.loadBalancer.ingress == null or (len .status.loadBalancer.ingress) == 0'

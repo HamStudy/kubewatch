@@ -81,6 +81,7 @@ func (e *Engine) registerBuiltinFuncs() {
 	e.funcMap["div"] = e.divFunc
 	e.funcMap["mul"] = e.mulFunc
 	e.funcMap["sub"] = e.subFunc
+	e.funcMap["add"] = e.addFunc
 	e.funcMap["min"] = e.minFunc
 	e.funcMap["max"] = e.maxFunc
 
@@ -90,11 +91,19 @@ func (e *Engine) registerBuiltinFuncs() {
 	e.funcMap["trim"] = strings.TrimSpace
 	e.funcMap["upper"] = strings.ToUpper
 	e.funcMap["lower"] = strings.ToLower
+	e.funcMap["len"] = e.lenFunc
+	e.funcMap["toString"] = e.toStringFunc
 
 	// Time functions
 	e.funcMap["ago"] = e.agoFunc
 	e.funcMap["ageInSeconds"] = e.ageInSecondsFunc
 	e.funcMap["timestamp"] = e.timestampFunc
+
+	// List/collection operations
+	e.funcMap["list"] = e.listFunc
+	e.funcMap["append"] = e.appendFunc
+	e.funcMap["slice"] = e.sliceFunc
+	e.funcMap["default"] = e.defaultFunc
 }
 
 // Execute runs a template with the given data
@@ -507,8 +516,26 @@ func (e *Engine) timestampFunc(t interface{}) string {
 	return ts.Format("2006-01-02 15:04:05")
 }
 
-// String functions
-func (e *Engine) joinFunc(slice interface{}, separator string) string {
+// String functions - handles both (slice, sep) and (sep, slice) signatures
+func (e *Engine) joinFunc(arg1 interface{}, arg2 interface{}) string {
+	// Try to determine which argument is the slice and which is the separator
+	var slice interface{}
+	var separator string
+
+	// Check if arg1 is a string (separator)
+	if sep, ok := arg1.(string); ok {
+		separator = sep
+		slice = arg2
+	} else {
+		// arg1 is the slice, arg2 should be the separator
+		slice = arg1
+		if sep, ok := arg2.(string); ok {
+			separator = sep
+		} else {
+			separator = fmt.Sprintf("%v", arg2)
+		}
+	}
+
 	switch v := slice.(type) {
 	case []string:
 		return strings.Join(v, separator)
@@ -521,6 +548,177 @@ func (e *Engine) joinFunc(slice interface{}, separator string) string {
 	default:
 		return fmt.Sprintf("%v", slice)
 	}
+}
+
+// addFunc adds multiple numbers together
+func (e *Engine) addFunc(values ...interface{}) float64 {
+	sum := 0.0
+	for _, v := range values {
+		sum += toFloat64(v)
+	}
+	return sum
+}
+
+// lenFunc returns the length of a string, slice, or map
+func (e *Engine) lenFunc(v interface{}) int {
+	if v == nil {
+		return 0
+	}
+	switch val := v.(type) {
+	case string:
+		return len(val)
+	case []interface{}:
+		return len(val)
+	case []string:
+		return len(val)
+	case map[string]interface{}:
+		return len(val)
+	case map[string]string:
+		return len(val)
+	default:
+		// Try reflection for other slice types
+		return 0
+	}
+}
+
+// toStringFunc converts any value to a string
+func (e *Engine) toStringFunc(v interface{}) string {
+	if v == nil {
+		return ""
+	}
+	switch val := v.(type) {
+	case string:
+		return val
+	case int:
+		return strconv.Itoa(val)
+	case int64:
+		return strconv.FormatInt(val, 10)
+	case float64:
+		// Format float without unnecessary decimals
+		if val == float64(int(val)) {
+			return strconv.Itoa(int(val))
+		}
+		return strconv.FormatFloat(val, 'f', -1, 64)
+	case bool:
+		return strconv.FormatBool(val)
+	default:
+		return fmt.Sprintf("%v", v)
+	}
+}
+
+// listFunc creates a new list from the given values
+func (e *Engine) listFunc(values ...interface{}) []interface{} {
+	return values
+}
+
+// appendFunc appends values to a list
+func (e *Engine) appendFunc(list interface{}, values ...interface{}) []interface{} {
+	var result []interface{}
+
+	// Convert list to []interface{}
+	switch l := list.(type) {
+	case []interface{}:
+		result = l
+	case []string:
+		for _, v := range l {
+			result = append(result, v)
+		}
+	default:
+		// If not a list, start with empty
+		result = []interface{}{}
+	}
+
+	// Append new values
+	result = append(result, values...)
+	return result
+}
+
+// sliceFunc returns a slice of a list from start to end (exclusive)
+func (e *Engine) sliceFunc(list interface{}, indices ...int) []interface{} {
+	var items []interface{}
+
+	// Convert list to []interface{}
+	switch l := list.(type) {
+	case []interface{}:
+		items = l
+	case []string:
+		for _, v := range l {
+			items = append(items, v)
+		}
+	default:
+		return []interface{}{}
+	}
+
+	// Parse indices
+	start := 0
+	end := len(items)
+
+	if len(indices) > 0 {
+		start = indices[0]
+		if start < 0 {
+			start = 0
+		}
+		if start > len(items) {
+			start = len(items)
+		}
+	}
+
+	if len(indices) > 1 {
+		end = indices[1]
+		if end < start {
+			end = start
+		}
+		if end > len(items) {
+			end = len(items)
+		}
+	}
+
+	return items[start:end]
+}
+
+// defaultFunc returns the default value if the given value is empty
+func (e *Engine) defaultFunc(defaultVal, val interface{}) interface{} {
+	// Check if val is empty/nil/zero
+	if val == nil {
+		return defaultVal
+	}
+
+	switch v := val.(type) {
+	case string:
+		if v == "" {
+			return defaultVal
+		}
+	case int:
+		if v == 0 {
+			return defaultVal
+		}
+	case int64:
+		if v == 0 {
+			return defaultVal
+		}
+	case float64:
+		if v == 0 {
+			return defaultVal
+		}
+	case bool:
+		if !v {
+			return defaultVal
+		}
+	case []interface{}:
+		if len(v) == 0 {
+			return defaultVal
+		}
+	case []string:
+		if len(v) == 0 {
+			return defaultVal
+		}
+	case map[string]interface{}:
+		if len(v) == 0 {
+			return defaultVal
+		}
+	}
+
+	return val
 }
 
 // Helper function to convert interface to float64

@@ -1,0 +1,270 @@
+apiVersion: kubewatch.io/v1
+kind: ResourceDefinition
+metadata:
+  name: statefulset
+  description: Kubernetes StatefulSet resource
+  icon: 
+spec:
+  # Kubernetes API information
+  kubernetes:
+    group: apps
+    version: v1
+    kind: StatefulSet
+    plural: statefulsets
+    namespaced: true
+    
+  # Column definitions for table display
+  columns:
+    - name: NAME
+      width: 30
+      priority: 1
+      template: "{{ .metadata.name }}"
+      sortable: true
+      
+    - name: NAMESPACE
+      width: 20
+      priority: 2
+      condition: "showNamespace"
+      template: |
+        {{- if hasPrefix .metadata.namespace "kube-" -}}
+          {{- color "blue" .metadata.namespace -}}
+        {{- else if eq .metadata.namespace "default" -}}
+          {{- color "gray" .metadata.namespace -}}
+        {{- else -}}
+          {{- .metadata.namespace -}}
+        {{- end -}}
+      sortable: true
+      
+    - name: READY
+      width: 8
+      priority: 1
+      align: center
+      template: |
+        {{- $ready := .status.readyReplicas | default 0 -}}
+        {{- $desired := .spec.replicas | default 1 -}}
+        {{- if eq $ready $desired -}}
+          {{- color "green" (printf "%d/%d" $ready $desired) -}}
+        {{- else if eq $ready 0 -}}
+          {{- color "red" (printf "%d/%d" $ready $desired) -}}
+        {{- else -}}
+          {{- color "yellow" (printf "%d/%d" $ready $desired) -}}
+        {{- end -}}
+      sortable: true
+      sortKey: "readyRatio"
+      
+    - name: AGE
+      width: 10
+      priority: 1
+      template: |
+        {{- $age := .metadata.creationTimestamp | ago -}}
+        {{- $ageSeconds := .metadata.creationTimestamp | ageInSeconds -}}
+        
+        {{- if lt $ageSeconds 300 -}}
+          {{- color "cyan" $age -}}
+        {{- else if lt $ageSeconds 3600 -}}
+          {{- color "green" $age -}}
+        {{- else if lt $ageSeconds 86400 -}}
+          {{- color "white" $age -}}
+        {{- else -}}
+          {{- color "gray" $age -}}
+        {{- end -}}
+      sortable: true
+      sortKey: "creationTimestamp"
+      
+    - name: CONTAINERS
+      width: 25
+      priority: 2
+      template: |
+        {{- $containers := list -}}
+        {{- range .spec.template.spec.containers -}}
+          {{- $containers = append $containers .name -}}
+        {{- end -}}
+        {{- if gt (len $containers) 3 -}}
+          {{- printf "%s... (%d total)" (join (slice $containers 0 3) ",") (len $containers) -}}
+        {{- else -}}
+          {{- join $containers "," -}}
+        {{- end -}}
+      sortable: false
+      
+    - name: IMAGES
+      width: 40
+      priority: 3
+      template: |
+        {{- $images := list -}}
+        {{- range .spec.template.spec.containers -}}
+          {{- $img := .image -}}
+          {{- /* Shorten image names for display */ -}}
+          {{- if contains "/" $img -}}
+            {{- $parts := split "/" $img -}}
+            {{- $img = index $parts (sub (len $parts) 1) -}}
+          {{- end -}}
+          {{- if contains ":" $img -}}
+            {{- $parts := split ":" $img -}}
+            {{- $name := index $parts 0 -}}
+            {{- $tag := index $parts 1 -}}
+            {{- if gt (len $tag) 7 -}}
+              {{- $tag = printf "%s..." (slice $tag 0 7) -}}
+            {{- end -}}
+            {{- $img = printf "%s:%s" $name $tag -}}
+          {{- end -}}
+          {{- $images = append $images $img -}}
+        {{- end -}}
+        {{- if gt (len $images) 2 -}}
+          {{- printf "%s... (%d images)" (join (slice $images 0 2) ",") (len $images) -}}
+        {{- else -}}
+          {{- join $images "," -}}
+        {{- end -}}
+      sortable: false
+      
+    - name: CURRENT
+      width: 10
+      priority: 2
+      align: center
+      template: |
+        {{- $current := .status.currentReplicas | default 0 -}}
+        {{- $desired := .spec.replicas | default 1 -}}
+        {{- if eq $current $desired -}}
+          {{- color "green" (toString $current) -}}
+        {{- else -}}
+          {{- color "yellow" (toString $current) -}}
+        {{- end -}}
+      sortable: true
+      
+    - name: UPDATE-REVISION
+      width: 15
+      priority: 3
+      template: |
+        {{- if .status.updateRevision -}}
+          {{- /* Show shortened revision hash */ -}}
+          {{- $rev := .status.updateRevision -}}
+          {{- if contains "-" $rev -}}
+            {{- $parts := split "-" $rev -}}
+            {{- $hash := index $parts (sub (len $parts) 1) -}}
+            {{- if gt (len $hash) 7 -}}
+              {{- printf "...%s" (slice $hash 0 7) -}}
+            {{- else -}}
+              {{- printf "...%s" $hash -}}
+            {{- end -}}
+          {{- else -}}
+            {{- $rev -}}
+          {{- end -}}
+        {{- else -}}
+          {{- color "gray" "<none>" -}}
+        {{- end -}}
+      sortable: false
+      
+    - name: SERVICE
+      width: 25
+      priority: 3
+      template: |
+        {{- if .spec.serviceName -}}
+          {{- .spec.serviceName -}}
+        {{- else -}}
+          {{- color "gray" "<none>" -}}
+        {{- end -}}
+      sortable: true
+      
+    - name: PVCS
+      width: 30
+      priority: 4
+      template: |
+        {{- $pvcs := list -}}
+        {{- range .spec.volumeClaimTemplates -}}
+          {{- $pvcs = append $pvcs .metadata.name -}}
+        {{- end -}}
+        {{- if $pvcs -}}
+          {{- if gt (len $pvcs) 2 -}}
+            {{- printf "%s... (%d pvcs)" (join (slice $pvcs 0 2) ",") (len $pvcs) -}}
+          {{- else -}}
+            {{- join $pvcs "," -}}
+          {{- end -}}
+        {{- else -}}
+          {{- color "gray" "<none>" -}}
+        {{- end -}}
+      sortable: false
+      
+  # Operations available for this resource
+  operations:
+    - name: describe
+      key: "d"
+      description: "Describe statefulset"
+      command: "kubectl describe statefulset {{ .metadata.name }} -n {{ .metadata.namespace }}"
+      
+    - name: scale
+      key: "s"
+      description: "Scale statefulset"
+      command: "kubectl scale statefulset {{ .metadata.name }} -n {{ .metadata.namespace }} --replicas="
+      interactive: true
+      prompt: "Enter number of replicas:"
+      
+    - name: restart
+      key: "r"
+      description: "Restart statefulset"
+      command: "kubectl rollout restart statefulset {{ .metadata.name }} -n {{ .metadata.namespace }}"
+      confirm: true
+      confirmMessage: "Restart statefulset {{ .metadata.name }}?"
+      
+    - name: rollout-status
+      key: "R"
+      description: "Check rollout status"
+      command: "kubectl rollout status statefulset {{ .metadata.name }} -n {{ .metadata.namespace }}"
+      
+    - name: rollout-history
+      key: "h"
+      description: "View rollout history"
+      command: "kubectl rollout history statefulset {{ .metadata.name }} -n {{ .metadata.namespace }}"
+      
+    - name: edit
+      key: "E"
+      description: "Edit statefulset"
+      command: "kubectl edit statefulset {{ .metadata.name }} -n {{ .metadata.namespace }}"
+      
+    - name: delete
+      key: "x"
+      description: "Delete statefulset"
+      confirm: true
+      confirmMessage: "Delete statefulset {{ .metadata.name }}? This will delete all pods and PVCs!"
+      command: "kubectl delete statefulset {{ .metadata.name }} -n {{ .metadata.namespace }}"
+      
+    - name: logs
+      key: "l"
+      description: "View logs from all pods"
+      command: "kubectl logs -l {{ range $k, $v := .spec.selector.matchLabels }}{{ $k }}={{ $v }}{{ end }} -n {{ .metadata.namespace }}"
+      
+    - name: list-pvcs
+      key: "P"
+      description: "List persistent volume claims"
+      command: "kubectl get pvc -l {{ range $k, $v := .spec.selector.matchLabels }}{{ $k }}={{ $v }}{{ end }} -n {{ .metadata.namespace }}"
+      
+  # Grouping configuration
+  grouping:
+    enabled: true
+    groupBy:
+      - field: ".metadata.labels.app"
+        name: "Application"
+        icon: "📦"
+      - field: ".spec.serviceName"
+        name: "Service"
+        icon: "🔌"
+    aggregations:
+      - column: "READY"
+        function: "sum"
+        format: "{{ .ready }}/{{ .total }} replicas"
+        
+  # Filtering options
+  filters:
+    - name: "Healthy Only"
+      key: "h"
+      condition: |
+        {{- $ready := .status.readyReplicas | default 0 -}}
+        {{- $desired := .spec.replicas | default 1 -}}
+        {{- eq $ready $desired -}}
+    - name: "Unhealthy"
+      key: "u"
+      condition: |
+        {{- $ready := .status.readyReplicas | default 0 -}}
+        {{- $desired := .spec.replicas | default 1 -}}
+        {{- ne $ready $desired -}}
+    - name: "With PVCs"
+      key: "p"
+      condition: '.spec.volumeClaimTemplates != null and (len .spec.volumeClaimTemplates) > 0'

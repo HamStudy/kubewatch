@@ -1,0 +1,873 @@
+package views
+
+import (
+	"context"
+	"fmt"
+	"testing"
+
+	"github.com/charmbracelet/bubbles/table"
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/dynamic/fake"
+
+	"github.com/HamStudy/kubewatch/internal/config/resource"
+	"github.com/HamStudy/kubewatch/internal/core"
+	"github.com/HamStudy/kubewatch/internal/template"
+)
+
+// TestGenericResourceView_NewGenericResourceView tests the creation of a generic resource view
+func TestGenericResourceView_NewGenericResourceView(t *testing.T) {
+	tests := []struct {
+		name      string
+		state     *core.State
+		wantError bool
+	}{
+		{
+			name: "successful creation",
+			state: &core.State{
+				CurrentNamespace: "default",
+				CurrentContext:   "test-context",
+			},
+			wantError: false,
+		},
+		{
+			name:      "nil state",
+			state:     nil,
+			wantError: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			registry := resource.NewRegistry()
+			engine := template.NewEngine()
+			dynamicClient := fake.NewSimpleDynamicClient(runtime.NewScheme())
+
+			view, err := NewGenericResourceView(tt.state, registry, engine, dynamicClient)
+
+			if tt.wantError {
+				assert.Error(t, err)
+				assert.Nil(t, view)
+			} else {
+				assert.NoError(t, err)
+				assert.NotNil(t, view)
+				assert.Equal(t, tt.state, view.state)
+				assert.NotNil(t, view.registry)
+				assert.NotNil(t, view.templateEngine)
+				assert.NotNil(t, view.dynamicClient)
+			}
+		})
+	}
+}
+
+// TestGenericResourceView_RefreshResources tests fetching resources using dynamic client
+func TestGenericResourceView_RefreshResources(t *testing.T) {
+	tests := []struct {
+		name          string
+		resourceType  string
+		namespace     string
+		objects       []runtime.Object
+		wantCount     int
+		wantError     bool
+		setupRegistry func(*resource.Registry)
+	}{
+		{
+			name:         "fetch pods successfully",
+			resourceType: "pods",
+			namespace:    "default",
+			objects: []runtime.Object{
+				createUnstructuredPod("pod1", "default", "Running"),
+				createUnstructuredPod("pod2", "default", "Pending"),
+			},
+			wantCount: 2,
+			wantError: false,
+			setupRegistry: func(r *resource.Registry) {
+				def := &resource.ResourceDefinition{
+					APIVersion: "kubewatch.io/v1",
+					Kind:       "ResourceDefinition",
+					Metadata: resource.Metadata{
+						Name: "pods",
+					},
+					Spec: resource.Spec{
+						Kubernetes: resource.KubernetesSpec{
+							Group:      "",
+							Version:    "v1",
+							Kind:       "Pod",
+							Plural:     "pods",
+							Namespaced: true,
+						},
+						Columns: []resource.Column{
+							{Name: "Name", Template: "{{ .metadata.name }}", Width: 30},
+							{Name: "Status", Template: "{{ .status.phase }}", Width: 20},
+						},
+					},
+				}
+				if err := r.Register(def); err != nil {
+					panic(fmt.Sprintf("Failed to register resource: %v", err))
+				}
+			},
+		},
+		{
+			name:         "fetch deployments successfully",
+			resourceType: "deployments",
+			namespace:    "default",
+			objects: []runtime.Object{
+				createUnstructuredDeployment("deploy1", "default", 3, 3),
+				createUnstructuredDeployment("deploy2", "default", 2, 1),
+			},
+			wantCount: 2,
+			wantError: false,
+			setupRegistry: func(r *resource.Registry) {
+				def := &resource.ResourceDefinition{
+					APIVersion: "kubewatch.io/v1",
+					Kind:       "ResourceDefinition",
+					Metadata: resource.Metadata{
+						Name: "deployments",
+					},
+					Spec: resource.Spec{
+						Kubernetes: resource.KubernetesSpec{
+							Group:      "apps",
+							Version:    "v1",
+							Kind:       "Deployment",
+							Plural:     "deployments",
+							Namespaced: true,
+						},
+						Columns: []resource.Column{
+							{Name: "Name", Template: "{{ .metadata.name }}"},
+							{Name: "Ready", Template: "{{ .status.readyReplicas }}/{{ .status.replicas }}", Width: 15},
+						},
+					},
+				}
+				if err := r.Register(def); err != nil {
+					panic(fmt.Sprintf("Failed to register resource: %v", err))
+				}
+			},
+		},
+		{
+			name:         "resource type not found",
+			resourceType: "unknown",
+			namespace:    "default",
+			objects:      []runtime.Object{},
+			wantCount:    0,
+			wantError:    true,
+			setupRegistry: func(r *resource.Registry) {
+				// Don't register anything
+			},
+		},
+		{
+			name:         "all namespaces",
+			resourceType: "pods",
+			namespace:    "",
+			objects: []runtime.Object{
+				createUnstructuredPod("pod1", "default", "Running"),
+				createUnstructuredPod("pod2", "kube-system", "Running"),
+				createUnstructuredPod("pod3", "test", "Pending"),
+			},
+			wantCount: 3,
+			wantError: false,
+			setupRegistry: func(r *resource.Registry) {
+				def := &resource.ResourceDefinition{
+					APIVersion: "kubewatch.io/v1",
+					Kind:       "ResourceDefinition",
+					Metadata: resource.Metadata{
+						Name: "pods",
+					},
+					Spec: resource.Spec{
+						Kubernetes: resource.KubernetesSpec{
+							Group:      "",
+							Version:    "v1",
+							Kind:       "Pod",
+							Plural:     "pods",
+							Namespaced: true,
+						},
+						Columns: []resource.Column{
+							{Name: "Name", Template: "{{ .metadata.name }}"},
+							{Name: "Namespace", Template: "{{ .metadata.namespace }}", Width: 20},
+						},
+					},
+				}
+				if err := r.Register(def); err != nil {
+					panic(fmt.Sprintf("Failed to register resource: %v", err))
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Setup
+			registry := resource.NewRegistry()
+			if tt.setupRegistry != nil {
+				tt.setupRegistry(registry)
+			}
+
+			engine := template.NewEngine()
+			dynamicClient := fake.NewSimpleDynamicClient(runtime.NewScheme(), tt.objects...)
+
+			state := &core.State{
+				CurrentNamespace: tt.namespace,
+				CurrentContext:   "test-context",
+			}
+
+			view, err := NewGenericResourceView(state, registry, engine, dynamicClient)
+			require.NoError(t, err)
+
+			// Set the current resource type
+			view.currentResourceType = tt.resourceType
+
+			// Execute
+			err = view.RefreshResources(context.Background())
+
+			// Assert
+			if tt.wantError {
+				assert.Error(t, err)
+			} else {
+				assert.NoError(t, err)
+				assert.Len(t, view.resources, tt.wantCount)
+			}
+		})
+	}
+}
+
+// TestGenericResourceView_RenderColumns tests template-based column rendering
+func TestGenericResourceView_RenderColumns(t *testing.T) {
+	tests := []struct {
+		name        string
+		resource    *unstructured.Unstructured
+		definition  *resource.ResourceDefinition
+		wantColumns []string
+		wantError   bool
+	}{
+		{
+			name:     "render pod columns",
+			resource: createUnstructuredPod("test-pod", "default", "Running"),
+			definition: &resource.ResourceDefinition{
+				Spec: resource.Spec{
+					Columns: []resource.Column{
+						{Name: "Name", Template: "{{ .metadata.name }}", Width: 30},
+						{Name: "Status", Template: "{{ .status.phase }}", Width: 20},
+						{Name: "Node", Template: "{{ .spec.nodeName | default \"<none>\" }}", Width: 20},
+					},
+				},
+			},
+			wantColumns: []string{"test-pod", "Running", "node1"},
+			wantError:   false,
+		},
+		{
+			name:     "render deployment columns",
+			resource: createUnstructuredDeployment("test-deploy", "default", 3, 2),
+			definition: &resource.ResourceDefinition{
+				Spec: resource.Spec{
+					Columns: []resource.Column{
+						{Name: "Name", Template: "{{ .metadata.name }}"},
+						{Name: "Ready", Template: "{{ .status.readyReplicas }}/{{ .status.replicas }}"},
+						{Name: "Available", Template: "{{ .status.availableReplicas }}"},
+					},
+				},
+			},
+			wantColumns: []string{"test-deploy", "2/3", "2"},
+			wantError:   false,
+		},
+		{
+			name:     "handle missing fields gracefully",
+			resource: createUnstructuredPod("test-pod", "default", ""),
+			definition: &resource.ResourceDefinition{
+				Spec: resource.Spec{
+					Columns: []resource.Column{
+						{Name: "Name", Template: "{{ .metadata.name }}"},
+						{Name: "Status", Template: "{{ .status.phase | default \"Unknown\" }}"},
+						{Name: "IP", Template: "{{ .status.podIP | default \"<none>\" }}"},
+					},
+				},
+			},
+			wantColumns: []string{"test-pod", "Unknown", "<none>"},
+			wantError:   false,
+		},
+		{
+			name:     "complex template expressions",
+			resource: createUnstructuredDeployment("test-deploy", "default", 3, 3),
+			definition: &resource.ResourceDefinition{
+				Spec: resource.Spec{
+					Columns: []resource.Column{
+						{Name: "Name", Template: "{{ .metadata.name }}"},
+						{Name: "Status", Template: "{{ if eq .status.readyReplicas .status.replicas }}Ready{{ else }}Not Ready{{ end }}"},
+						{Name: "Age", Template: "{{ .metadata.creationTimestamp }}"},
+					},
+				},
+			},
+			wantColumns: []string{"test-deploy", "Ready", "2024-01-01T00:00:00Z"},
+			wantError:   false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Setup
+			registry := resource.NewRegistry()
+			engine := template.NewEngine()
+			dynamicClient := fake.NewSimpleDynamicClient(runtime.NewScheme())
+
+			state := &core.State{
+				CurrentNamespace: "default",
+				CurrentContext:   "test-context",
+			}
+
+			view, err := NewGenericResourceView(state, registry, engine, dynamicClient)
+			require.NoError(t, err)
+
+			// Execute
+			columns, err := view.renderColumns(tt.resource, tt.definition)
+
+			// Assert
+			if tt.wantError {
+				assert.Error(t, err)
+			} else {
+				assert.NoError(t, err)
+				assert.Equal(t, tt.wantColumns, columns)
+			}
+		})
+	}
+}
+
+// TestGenericResourceView_UpdateTable tests building table rows using templates
+func TestGenericResourceView_UpdateTable(t *testing.T) {
+	tests := []struct {
+		name         string
+		resources    []*unstructured.Unstructured
+		definition   *resource.ResourceDefinition
+		wantRowCount int
+		wantHeaders  []string
+		validateRows func(*testing.T, []table.Row)
+	}{
+		{
+			name: "update table with pods",
+			resources: []*unstructured.Unstructured{
+				createUnstructuredPod("pod1", "default", "Running"),
+				createUnstructuredPod("pod2", "default", "Pending"),
+				createUnstructuredPod("pod3", "default", "Failed"),
+			},
+			definition: &resource.ResourceDefinition{
+				Spec: resource.Spec{
+					Columns: []resource.Column{
+						{Name: "Name", Template: "{{ .metadata.name }}"},
+						{Name: "Status", Template: "{{ .status.phase }}"},
+						{Name: "Namespace", Template: "{{ .metadata.namespace }}"},
+					},
+				},
+			},
+			wantRowCount: 3,
+			wantHeaders:  []string{"Name", "Status", "Namespace"},
+			validateRows: func(t *testing.T, rows []table.Row) {
+				assert.Equal(t, []string{"pod1", "Running", "default"}, rows[0])
+				assert.Equal(t, []string{"pod2", "Pending", "default"}, rows[1])
+				assert.Equal(t, []string{"pod3", "Failed", "default"}, rows[2])
+			},
+		},
+		{
+			name:      "empty resources",
+			resources: []*unstructured.Unstructured{},
+			definition: &resource.ResourceDefinition{
+				Spec: resource.Spec{
+					Columns: []resource.Column{
+						{Name: "Name", Template: "{{ .metadata.name }}"},
+						{Name: "Status", Template: "{{ .status.phase }}"},
+					},
+				},
+			},
+			wantRowCount: 0,
+			wantHeaders:  []string{"Name", "Status"},
+			validateRows: func(t *testing.T, rows []table.Row) {
+				assert.Empty(t, rows)
+			},
+		},
+		{
+			name: "mixed resource types should handle gracefully",
+			resources: []*unstructured.Unstructured{
+				createUnstructuredPod("pod1", "default", "Running"),
+				createUnstructuredDeployment("deploy1", "default", 3, 3),
+			},
+			definition: &resource.ResourceDefinition{
+				Spec: resource.Spec{
+					Columns: []resource.Column{
+						{Name: "Name", Template: "{{ .metadata.name }}"},
+						{Name: "Kind", Template: "{{ .kind }}"},
+					},
+				},
+			},
+			wantRowCount: 2,
+			wantHeaders:  []string{"Name", "Kind"},
+			validateRows: func(t *testing.T, rows []table.Row) {
+				assert.Equal(t, []string{"pod1", "Pod"}, rows[0])
+				assert.Equal(t, []string{"deploy1", "Deployment"}, rows[1])
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Setup
+			registry := resource.NewRegistry()
+			engine := template.NewEngine()
+			dynamicClient := fake.NewSimpleDynamicClient(runtime.NewScheme())
+
+			state := &core.State{
+				CurrentNamespace: "default",
+				CurrentContext:   "test-context",
+			}
+
+			view, err := NewGenericResourceView(state, registry, engine, dynamicClient)
+			require.NoError(t, err)
+
+			// Set resources and definition
+			view.resources = tt.resources
+			view.currentDefinition = tt.definition
+
+			// Execute
+			err = view.updateTable()
+
+			// Assert
+			assert.NoError(t, err)
+
+			// Check headers
+			columns := view.table.Columns()
+			headers := make([]string, len(columns))
+			for i, col := range columns {
+				headers[i] = col.Title
+			}
+			assert.Equal(t, tt.wantHeaders, headers)
+
+			// Check rows
+			rows := view.table.Rows()
+			assert.Len(t, rows, tt.wantRowCount)
+			if tt.validateRows != nil {
+				tt.validateRows(t, rows)
+			}
+		})
+	}
+}
+
+// TestGenericResourceView_Sorting tests sorting functionality
+func TestGenericResourceView_Sorting(t *testing.T) {
+	tests := []struct {
+		name       string
+		resources  []*unstructured.Unstructured
+		sortColumn int
+		sortAsc    bool
+		wantOrder  []string
+	}{
+		{
+			name: "sort by name ascending",
+			resources: []*unstructured.Unstructured{
+				createUnstructuredPod("charlie", "default", "Running"),
+				createUnstructuredPod("alice", "default", "Running"),
+				createUnstructuredPod("bob", "default", "Running"),
+			},
+			sortColumn: 0,
+			sortAsc:    true,
+			wantOrder:  []string{"alice", "bob", "charlie"},
+		},
+		{
+			name: "sort by name descending",
+			resources: []*unstructured.Unstructured{
+				createUnstructuredPod("charlie", "default", "Running"),
+				createUnstructuredPod("alice", "default", "Running"),
+				createUnstructuredPod("bob", "default", "Running"),
+			},
+			sortColumn: 0,
+			sortAsc:    false,
+			wantOrder:  []string{"charlie", "bob", "alice"},
+		},
+		{
+			name: "sort by status",
+			resources: []*unstructured.Unstructured{
+				createUnstructuredPod("pod1", "default", "Running"),
+				createUnstructuredPod("pod2", "default", "Failed"),
+				createUnstructuredPod("pod3", "default", "Pending"),
+			},
+			sortColumn: 1,
+			sortAsc:    true,
+			wantOrder:  []string{"Failed", "Pending", "Running"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Setup
+			registry := resource.NewRegistry()
+			def := &resource.ResourceDefinition{
+				APIVersion: "kubewatch.io/v1",
+				Kind:       "ResourceDefinition",
+				Metadata: resource.Metadata{
+					Name: "pods",
+				},
+				Spec: resource.Spec{
+					Kubernetes: resource.KubernetesSpec{
+						Group:      "",
+						Version:    "v1",
+						Kind:       "Pod",
+						Plural:     "pods",
+						Namespaced: true,
+					},
+					Columns: []resource.Column{
+						{Name: "Name", Template: "{{ .metadata.name }}"},
+						{Name: "Status", Template: "{{ .status.phase }}"},
+					},
+				},
+			}
+			registry.Register(def)
+
+			engine := template.NewEngine()
+			dynamicClient := fake.NewSimpleDynamicClient(runtime.NewScheme())
+
+			state := &core.State{
+				CurrentNamespace: "default",
+				CurrentContext:   "test-context",
+			}
+
+			view, err := NewGenericResourceView(state, registry, engine, dynamicClient)
+			require.NoError(t, err)
+
+			// Set resources and update table
+			view.resources = tt.resources
+			view.currentDefinition = def
+			view.sortColumn = tt.sortColumn
+			view.sortAsc = tt.sortAsc
+
+			// Execute sort
+			err = view.sortResources()
+			require.NoError(t, err)
+
+			// Update table after sorting
+			err = view.updateTable()
+			require.NoError(t, err)
+
+			// Verify order
+			rows := view.table.Rows()
+			for i, expectedValue := range tt.wantOrder {
+				assert.Equal(t, expectedValue, rows[i][tt.sortColumn])
+			}
+		})
+	}
+}
+
+// TestGenericResourceView_Filtering tests filtering functionality
+func TestGenericResourceView_Filtering(t *testing.T) {
+	tests := []struct {
+		name         string
+		resources    []*unstructured.Unstructured
+		filterText   string
+		wantFiltered int
+		wantNames    []string
+	}{
+		{
+			name: "filter by name",
+			resources: []*unstructured.Unstructured{
+				createUnstructuredPod("nginx-pod", "default", "Running"),
+				createUnstructuredPod("redis-pod", "default", "Running"),
+				createUnstructuredPod("nginx-cache", "default", "Pending"),
+			},
+			filterText:   "nginx",
+			wantFiltered: 2,
+			wantNames:    []string{"nginx-pod", "nginx-cache"},
+		},
+		{
+			name: "filter by status",
+			resources: []*unstructured.Unstructured{
+				createUnstructuredPod("pod1", "default", "Running"),
+				createUnstructuredPod("pod2", "default", "Pending"),
+				createUnstructuredPod("pod3", "default", "Running"),
+			},
+			filterText:   "Running",
+			wantFiltered: 2,
+			wantNames:    []string{"pod1", "pod3"},
+		},
+		{
+			name: "no matches",
+			resources: []*unstructured.Unstructured{
+				createUnstructuredPod("pod1", "default", "Running"),
+				createUnstructuredPod("pod2", "default", "Running"),
+			},
+			filterText:   "nonexistent",
+			wantFiltered: 0,
+			wantNames:    []string{},
+		},
+		{
+			name: "empty filter shows all",
+			resources: []*unstructured.Unstructured{
+				createUnstructuredPod("pod1", "default", "Running"),
+				createUnstructuredPod("pod2", "default", "Pending"),
+			},
+			filterText:   "",
+			wantFiltered: 2,
+			wantNames:    []string{"pod1", "pod2"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Setup
+			registry := resource.NewRegistry()
+			def := &resource.ResourceDefinition{
+				APIVersion: "kubewatch.io/v1",
+				Kind:       "ResourceDefinition",
+				Metadata: resource.Metadata{
+					Name: "pods",
+				},
+				Spec: resource.Spec{
+					Kubernetes: resource.KubernetesSpec{
+						Group:      "",
+						Version:    "v1",
+						Kind:       "Pod",
+						Plural:     "pods",
+						Namespaced: true,
+					},
+					Columns: []resource.Column{
+						{Name: "Name", Template: "{{ .metadata.name }}"},
+						{Name: "Status", Template: "{{ .status.phase }}"},
+					},
+				},
+			}
+			registry.Register(def)
+
+			engine := template.NewEngine()
+			dynamicClient := fake.NewSimpleDynamicClient(runtime.NewScheme())
+
+			state := &core.State{
+				CurrentNamespace: "default",
+				CurrentContext:   "test-context",
+			}
+
+			view, err := NewGenericResourceView(state, registry, engine, dynamicClient)
+			require.NoError(t, err)
+
+			// Set resources and filter
+			view.resources = tt.resources
+			view.currentDefinition = def
+			view.filterText = tt.filterText
+
+			// Execute filter
+			filtered := view.applyFilter()
+
+			// Verify results
+			assert.Len(t, filtered, tt.wantFiltered)
+
+			names := make([]string, len(filtered))
+			for i, res := range filtered {
+				name, _, _ := unstructured.NestedString(res.Object, "metadata", "name")
+				names[i] = name
+			}
+			assert.Equal(t, tt.wantNames, names)
+		})
+	}
+}
+
+// TestGenericResourceView_MultiContext tests multi-context support
+func TestGenericResourceView_MultiContext(t *testing.T) {
+	tests := []struct {
+		name           string
+		contexts       []string
+		currentContext string
+		resources      map[string][]*unstructured.Unstructured
+		wantResources  int
+	}{
+		{
+			name:           "single context",
+			contexts:       []string{"context1"},
+			currentContext: "context1",
+			resources: map[string][]*unstructured.Unstructured{
+				"context1": {
+					createUnstructuredPod("pod1", "default", "Running"),
+					createUnstructuredPod("pod2", "default", "Pending"),
+				},
+			},
+			wantResources: 2,
+		},
+		{
+			name:           "switch contexts",
+			contexts:       []string{"context1", "context2"},
+			currentContext: "context2",
+			resources: map[string][]*unstructured.Unstructured{
+				"context1": {
+					createUnstructuredPod("pod1", "default", "Running"),
+				},
+				"context2": {
+					createUnstructuredPod("pod2", "default", "Pending"),
+					createUnstructuredPod("pod3", "default", "Running"),
+				},
+			},
+			wantResources: 2,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Setup
+			registry := resource.NewRegistry()
+			def := &resource.ResourceDefinition{
+				APIVersion: "kubewatch.io/v1",
+				Kind:       "ResourceDefinition",
+				Metadata: resource.Metadata{
+					Name: "pods",
+				},
+				Spec: resource.Spec{
+					Kubernetes: resource.KubernetesSpec{
+						Group:      "",
+						Version:    "v1",
+						Kind:       "Pod",
+						Plural:     "pods",
+						Namespaced: true,
+					},
+					Columns: []resource.Column{
+						{Name: "Name", Template: "{{ .metadata.name }}"},
+						{Name: "Status", Template: "{{ .status.phase }}"},
+					},
+				},
+			}
+			registry.Register(def)
+
+			engine := template.NewEngine()
+
+			// Create dynamic client with resources for current context
+			var objects []runtime.Object
+			if resources, ok := tt.resources[tt.currentContext]; ok {
+				for _, res := range resources {
+					objects = append(objects, res)
+				}
+			}
+			dynamicClient := fake.NewSimpleDynamicClient(runtime.NewScheme(), objects...)
+
+			state := &core.State{
+				CurrentNamespace: "default",
+				CurrentContext:   tt.currentContext,
+			}
+
+			view, err := NewGenericResourceView(state, registry, engine, dynamicClient)
+			require.NoError(t, err)
+
+			// Set resource type and refresh
+			view.currentResourceType = "pods"
+			err = view.RefreshResources(context.Background())
+			require.NoError(t, err)
+
+			// Verify
+			assert.Len(t, view.resources, tt.wantResources)
+		})
+	}
+}
+
+// TestGenericResourceView_Update tests the Update method for handling messages
+func TestGenericResourceView_Update(t *testing.T) {
+	tests := []struct {
+		name         string
+		msg          tea.Msg
+		wantCmd      bool
+		validateView func(*testing.T, *GenericResourceView)
+	}{
+		{
+			name:    "handle key message for refresh",
+			msg:     tea.KeyMsg{Type: tea.KeyF5},
+			wantCmd: true,
+			validateView: func(t *testing.T, view *GenericResourceView) {
+				// Refresh should trigger a command
+			},
+		},
+		{
+			name:    "handle window size message",
+			msg:     tea.WindowSizeMsg{Width: 120, Height: 40},
+			wantCmd: false,
+			validateView: func(t *testing.T, view *GenericResourceView) {
+				assert.Equal(t, 120, view.width)
+				assert.Equal(t, 40, view.height)
+			},
+		},
+		{
+			name:    "handle resource update message",
+			msg:     ResourceUpdateMsg{ResourceType: "deployments"},
+			wantCmd: true,
+			validateView: func(t *testing.T, view *GenericResourceView) {
+				assert.Equal(t, "deployments", view.currentResourceType)
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Setup
+			registry := resource.NewRegistry()
+			engine := template.NewEngine()
+			dynamicClient := fake.NewSimpleDynamicClient(runtime.NewScheme())
+
+			state := &core.State{
+				CurrentNamespace: "default",
+				CurrentContext:   "test-context",
+			}
+
+			view, err := NewGenericResourceView(state, registry, engine, dynamicClient)
+			require.NoError(t, err)
+
+			// Execute
+			model, cmd := view.Update(tt.msg)
+
+			// Assert
+			updatedView := model.(*GenericResourceView)
+			if tt.wantCmd {
+				assert.NotNil(t, cmd)
+			} else {
+				assert.Nil(t, cmd)
+			}
+
+			if tt.validateView != nil {
+				tt.validateView(t, updatedView)
+			}
+		})
+	}
+}
+
+// Helper functions
+
+func createUnstructuredPod(name, namespace, phase string) *unstructured.Unstructured {
+	pod := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "v1",
+			"kind":       "Pod",
+			"metadata": map[string]interface{}{
+				"name":              name,
+				"namespace":         namespace,
+				"creationTimestamp": "2024-01-01T00:00:00Z",
+			},
+			"spec": map[string]interface{}{
+				"nodeName": "node1",
+			},
+			"status": map[string]interface{}{
+				"phase": phase,
+			},
+		},
+	}
+	return pod
+}
+
+func createUnstructuredDeployment(name, namespace string, replicas, ready int) *unstructured.Unstructured {
+	deployment := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "apps/v1",
+			"kind":       "Deployment",
+			"metadata": map[string]interface{}{
+				"name":              name,
+				"namespace":         namespace,
+				"creationTimestamp": "2024-01-01T00:00:00Z",
+			},
+			"spec": map[string]interface{}{
+				"replicas": float64(replicas),
+			},
+			"status": map[string]interface{}{
+				"replicas":          float64(replicas),
+				"readyReplicas":     float64(ready),
+				"availableReplicas": float64(ready),
+			},
+		},
+	}
+	return deployment
+}

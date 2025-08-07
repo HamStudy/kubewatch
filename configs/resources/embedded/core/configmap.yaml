@@ -1,0 +1,196 @@
+apiVersion: kubewatch.io/v1
+kind: ResourceDefinition
+metadata:
+  name: configmap
+  description: Kubernetes ConfigMap resource
+  icon: 
+spec:
+  # Kubernetes API information
+  kubernetes:
+    group: ""  # core API group
+    version: v1
+    kind: ConfigMap
+    plural: configmaps
+    namespaced: true
+    
+  # Column definitions for table display
+  columns:
+    - name: NAME
+      width: 30
+      priority: 1
+      template: "{{ .metadata.name }}"
+      sortable: true
+      
+    - name: NAMESPACE
+      width: 20
+      priority: 2
+      condition: "showNamespace"
+      template: |
+        {{- if hasPrefix .metadata.namespace "kube-" -}}
+          {{- color "blue" .metadata.namespace -}}
+        {{- else if eq .metadata.namespace "default" -}}
+          {{- color "gray" .metadata.namespace -}}
+        {{- else -}}
+          {{- .metadata.namespace -}}
+        {{- end -}}
+      sortable: true
+      
+    - name: DATA
+      width: 10
+      priority: 1
+      align: center
+      template: |
+        {{- $dataCount := 0 -}}
+        {{- if .data -}}
+          {{- $dataCount = add $dataCount (len .data) -}}
+        {{- end -}}
+        {{- if .binaryData -}}
+          {{- $dataCount = add $dataCount (len .binaryData) -}}
+        {{- end -}}
+        
+        {{- if eq $dataCount 0 -}}
+          {{- color "gray" "0" -}}
+        {{- else if eq $dataCount 1 -}}
+          {{- color "green" "1" -}}
+        {{- else if lt $dataCount 5 -}}
+          {{- color "yellow" (toString $dataCount) -}}
+        {{- else -}}
+          {{- color "cyan" (toString $dataCount) -}}
+        {{- end -}}
+      sortable: true
+      sortKey: "dataCount"
+      
+    - name: AGE
+      width: 10
+      priority: 1
+      template: |
+        {{- $age := .metadata.creationTimestamp | ago -}}
+        {{- $ageSeconds := .metadata.creationTimestamp | ageInSeconds -}}
+        
+        {{- if lt $ageSeconds 300 -}}
+          {{- color "cyan" $age -}}
+        {{- else if lt $ageSeconds 3600 -}}
+          {{- color "green" $age -}}
+        {{- else if lt $ageSeconds 86400 -}}
+          {{- color "white" $age -}}
+        {{- else -}}
+          {{- color "gray" $age -}}
+        {{- end -}}
+      sortable: true
+      sortKey: "creationTimestamp"
+      
+    - name: KEYS
+      width: 50
+      priority: 2
+      template: |
+        {{- $keys := list -}}
+        {{- range $key, $_ := .data -}}
+          {{- $keys = append $keys $key -}}
+        {{- end -}}
+        {{- range $key, $_ := .binaryData -}}
+          {{- $keys = append $keys (printf "%s(binary)" $key) -}}
+        {{- end -}}
+        
+        {{- if $keys -}}
+          {{- if gt (len $keys) 5 -}}
+            {{- printf "%s... (%d keys)" (join (slice $keys 0 5) ", ") (len $keys) -}}
+          {{- else -}}
+            {{- join $keys ", " -}}
+          {{- end -}}
+        {{- else -}}
+          {{- color "gray" "<no data>" -}}
+        {{- end -}}
+      sortable: false
+      
+    - name: LABELS
+      width: 30
+      priority: 3
+      template: |
+        {{- $labels := list -}}
+        {{- range $key, $value := .metadata.labels -}}
+          {{- if not (hasPrefix $key "kubectl.kubernetes.io") -}}
+            {{- $labels = append $labels (printf "%s=%s" $key $value) -}}
+          {{- end -}}
+        {{- end -}}
+        {{- if $labels -}}
+          {{- if gt (len $labels) 2 -}}
+            {{- printf "%s..." (join (slice $labels 0 2) ",") -}}
+          {{- else -}}
+            {{- join $labels "," -}}
+          {{- end -}}
+        {{- else -}}
+          {{- color "gray" "<none>" -}}
+        {{- end -}}
+      sortable: false
+      
+  # Operations available for this resource
+  operations:
+    - name: describe
+      key: "d"
+      description: "Describe configmap"
+      command: "kubectl describe configmap {{ .metadata.name }} -n {{ .metadata.namespace }}"
+      
+    - name: view
+      key: "v"
+      description: "View configmap data"
+      command: "kubectl get configmap {{ .metadata.name }} -n {{ .metadata.namespace }} -o yaml"
+      
+    - name: edit
+      key: "E"
+      description: "Edit configmap"
+      command: "kubectl edit configmap {{ .metadata.name }} -n {{ .metadata.namespace }}"
+      
+    - name: delete
+      key: "x"
+      description: "Delete configmap"
+      confirm: true
+      confirmMessage: "Delete configmap {{ .metadata.name }}?"
+      command: "kubectl delete configmap {{ .metadata.name }} -n {{ .metadata.namespace }}"
+      
+    - name: export
+      key: "X"
+      description: "Export configmap to file"
+      command: "kubectl get configmap {{ .metadata.name }} -n {{ .metadata.namespace }} -o yaml > {{ .metadata.name }}-configmap.yaml"
+      
+  # Grouping configuration
+  grouping:
+    enabled: true
+    groupBy:
+      - field: ".metadata.labels.app"
+        name: "Application"
+        icon: "📦"
+      - field: ".metadata.labels.component"
+        name: "Component"
+        icon: "🔧"
+    aggregations:
+      - column: "DATA"
+        function: "sum"
+        format: "{{ . }} total keys"
+        
+  # Filtering options
+  filters:
+    - name: "Has Data"
+      key: "d"
+      condition: |
+        {{- $dataCount := 0 -}}
+        {{- if .data -}}
+          {{- $dataCount = add $dataCount (len .data) -}}
+        {{- end -}}
+        {{- if .binaryData -}}
+          {{- $dataCount = add $dataCount (len .binaryData) -}}
+        {{- end -}}
+        {{- gt $dataCount 0 -}}
+    - name: "Empty"
+      key: "e"
+      condition: |
+        {{- $dataCount := 0 -}}
+        {{- if .data -}}
+          {{- $dataCount = add $dataCount (len .data) -}}
+        {{- end -}}
+        {{- if .binaryData -}}
+          {{- $dataCount = add $dataCount (len .binaryData) -}}
+        {{- end -}}
+        {{- eq $dataCount 0 -}}
+    - name: "Binary Data"
+      key: "b"
+      condition: '.binaryData != null and (len .binaryData) > 0'

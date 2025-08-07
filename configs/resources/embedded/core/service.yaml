@@ -1,0 +1,235 @@
+apiVersion: kubewatch.io/v1
+kind: ResourceDefinition
+metadata:
+  name: service
+  description: Kubernetes Service resource
+  icon: 
+spec:
+  # Kubernetes API information
+  kubernetes:
+    group: ""  # core API group
+    version: v1
+    kind: Service
+    plural: services
+    namespaced: true
+    
+  # Column definitions for table display
+  columns:
+    - name: NAME
+      width: 30
+      priority: 1
+      template: "{{ .metadata.name }}"
+      sortable: true
+      
+    - name: NAMESPACE
+      width: 20
+      priority: 2
+      condition: "showNamespace"
+      template: |
+        {{- if hasPrefix .metadata.namespace "kube-" -}}
+          {{- color "blue" .metadata.namespace -}}
+        {{- else if eq .metadata.namespace "default" -}}
+          {{- color "gray" .metadata.namespace -}}
+        {{- else -}}
+          {{- .metadata.namespace -}}
+        {{- end -}}
+      sortable: true
+      
+    - name: TYPE
+      width: 15
+      priority: 1
+      template: |
+        {{- $type := .spec.type | default "ClusterIP" -}}
+        {{- if eq $type "ClusterIP" -}}
+          {{- color "green" "ClusterIP" -}}
+        {{- else if eq $type "NodePort" -}}
+          {{- color "yellow" "NodePort" -}}
+        {{- else if eq $type "LoadBalancer" -}}
+          {{- color "cyan" "LoadBalancer" -}}
+        {{- else if eq $type "ExternalName" -}}
+          {{- color "magenta" "ExternalName" -}}
+        {{- else -}}
+          {{- $type -}}
+        {{- end -}}
+      sortable: true
+      
+    - name: CLUSTER-IP
+      width: 18
+      priority: 1
+      template: |
+        {{- $clusterIP := .spec.clusterIP | default "" -}}
+        {{- if eq $clusterIP "" -}}
+          {{- color "gray" "None" -}}
+        {{- else if eq $clusterIP "None" -}}
+          {{- color "blue" "None" -}}
+        {{- else -}}
+          {{- $clusterIP -}}
+        {{- end -}}
+      sortable: true
+      
+    - name: EXTERNAL-IP
+      width: 20
+      priority: 1
+      template: |
+        {{- $externalIPs := list -}}
+        
+        {{- /* Check for explicit external IPs */ -}}
+        {{- if .spec.externalIPs -}}
+          {{- range .spec.externalIPs -}}
+            {{- $externalIPs = append $externalIPs . -}}
+          {{- end -}}
+        {{- end -}}
+        
+        {{- /* Check for LoadBalancer ingress */ -}}
+        {{- if and (eq .spec.type "LoadBalancer") .status.loadBalancer.ingress -}}
+          {{- range .status.loadBalancer.ingress -}}
+            {{- if .ip -}}
+              {{- $externalIPs = append $externalIPs .ip -}}
+            {{- else if .hostname -}}
+              {{- $externalIPs = append $externalIPs .hostname -}}
+            {{- end -}}
+          {{- end -}}
+        {{- end -}}
+        
+        {{- if $externalIPs -}}
+          {{- if gt (len $externalIPs) 2 -}}
+            {{- printf "%s..." (join (slice $externalIPs 0 2) ",") -}}
+          {{- else -}}
+            {{- join $externalIPs "," -}}
+          {{- end -}}
+        {{- else -}}
+          {{- color "gray" "<none>" -}}
+        {{- end -}}
+      sortable: true
+      
+    - name: PORT(S)
+      width: 30
+      priority: 1
+      template: |
+        {{- $ports := list -}}
+        {{- range .spec.ports -}}
+          {{- $portStr := toString .port -}}
+          
+          {{- /* Add NodePort if present */ -}}
+          {{- if and .nodePort (ne .nodePort 0) -}}
+            {{- $portStr = printf "%d:%d" .port .nodePort -}}
+          {{- end -}}
+          
+          {{- /* Add protocol if not TCP */ -}}
+          {{- if and .protocol (ne .protocol "TCP") -}}
+            {{- $portStr = printf "%s/%s" $portStr .protocol -}}
+          {{- end -}}
+          
+          {{- /* Add port name if present */ -}}
+          {{- if .name -}}
+            {{- $portStr = printf "%s(%s)" $portStr .name -}}
+          {{- end -}}
+          
+          {{- $ports = append $ports $portStr -}}
+        {{- end -}}
+        
+        {{- if $ports -}}
+          {{- join $ports "," -}}
+        {{- else -}}
+          {{- color "gray" "<none>" -}}
+        {{- end -}}
+      sortable: false
+      
+    - name: AGE
+      width: 10
+      priority: 1
+      template: |
+        {{- $age := .metadata.creationTimestamp | ago -}}
+        {{- $ageSeconds := .metadata.creationTimestamp | ageInSeconds -}}
+        
+        {{- if lt $ageSeconds 300 -}}
+          {{- color "cyan" $age -}}
+        {{- else if lt $ageSeconds 3600 -}}
+          {{- color "green" $age -}}
+        {{- else if lt $ageSeconds 86400 -}}
+          {{- color "white" $age -}}
+        {{- else -}}
+          {{- color "gray" $age -}}
+        {{- end -}}
+      sortable: true
+      sortKey: "creationTimestamp"
+      
+    - name: SELECTOR
+      width: 30
+      priority: 3
+      template: |
+        {{- $selectors := list -}}
+        {{- range $key, $value := .spec.selector -}}
+          {{- $selectors = append $selectors (printf "%s=%s" $key $value) -}}
+        {{- end -}}
+        {{- if $selectors -}}
+          {{- if gt (len $selectors) 2 -}}
+            {{- printf "%s..." (join (slice $selectors 0 2) ",") -}}
+          {{- else -}}
+            {{- join $selectors "," -}}
+          {{- end -}}
+        {{- else -}}
+          {{- color "gray" "<none>" -}}
+        {{- end -}}
+      sortable: false
+      
+  # Operations available for this resource
+  operations:
+    - name: describe
+      key: "d"
+      description: "Describe service"
+      command: "kubectl describe service {{ .metadata.name }} -n {{ .metadata.namespace }}"
+      
+    - name: endpoints
+      key: "e"
+      description: "Show endpoints"
+      command: "kubectl get endpoints {{ .metadata.name }} -n {{ .metadata.namespace }} -o wide"
+      
+    - name: edit
+      key: "E"
+      description: "Edit service"
+      command: "kubectl edit service {{ .metadata.name }} -n {{ .metadata.namespace }}"
+      
+    - name: delete
+      key: "x"
+      description: "Delete service"
+      confirm: true
+      confirmMessage: "Delete service {{ .metadata.name }}?"
+      command: "kubectl delete service {{ .metadata.name }} -n {{ .metadata.namespace }}"
+      
+    - name: port-forward
+      key: "p"
+      description: "Port forward to service"
+      command: "kubectl port-forward service/{{ .metadata.name }} -n {{ .metadata.namespace }}"
+      interactive: true
+      prompt: "Enter local:remote port (e.g., 8080:80):"
+      
+  # Grouping configuration
+  grouping:
+    enabled: true
+    groupBy:
+      - field: ".spec.type"
+        name: "Service Type"
+        icon: "🔌"
+      - field: ".metadata.labels.app"
+        name: "Application"
+        icon: "📦"
+    aggregations:
+      - column: "PORT(S)"
+        function: "count"
+        format: "{{ . }} services"
+        
+  # Filtering options
+  filters:
+    - name: "ClusterIP Only"
+      key: "c"
+      condition: '.spec.type == "ClusterIP" or .spec.type == null'
+    - name: "NodePort"
+      key: "n"
+      condition: '.spec.type == "NodePort"'
+    - name: "LoadBalancer"
+      key: "l"
+      condition: '.spec.type == "LoadBalancer"'
+    - name: "External IPs"
+      key: "e"
+      condition: '.spec.externalIPs != null or .status.loadBalancer.ingress != null'
