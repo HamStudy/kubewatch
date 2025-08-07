@@ -5,7 +5,6 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/muesli/reflow/truncate"
-	"github.com/muesli/reflow/wordwrap"
 )
 
 // Column represents a table column configuration
@@ -526,13 +525,13 @@ func (m *Model) renderRow(row Row, index int, isSelected bool) string {
 		}
 
 		// Handle word wrap or truncation
-		if m.wordWrap && len(text) > width {
-			wrapped := wordwrap.String(text, width)
-			lines := strings.Split(wrapped, "\n")
-			if len(lines) > 0 {
-				text = lines[0] // Take first line for now
-			}
+		if m.wordWrap {
+			// When word wrap is ON, allow content to expand beyond column width
+			// Don't truncate - let the content flow naturally
+			// For now, we don't implement multi-line wrapping in table cells
+			// but we don't truncate either
 		} else if len(text) > width {
+			// When word wrap is OFF, truncate content to fit within column width
 			switch col.TruncateAt {
 			case "middle":
 				if width > 3 {

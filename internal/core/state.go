@@ -95,6 +95,7 @@ func NewState(config *Config) *State {
 	return &State{
 		CurrentResourceType: resourceType,
 		CurrentNamespace:    config.CurrentNamespace,
+		CurrentContext:      config.CurrentContext,
 		SelectedItems:       make(map[string]bool),
 		config:              config,
 		SortColumn:          "NAME", // Default sort by name

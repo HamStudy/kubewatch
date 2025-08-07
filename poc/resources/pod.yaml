@@ -1,0 +1,154 @@
+# Pod Resource Configuration
+# This defines how pods are displayed in the kubewatch TUI
+
+apiVersion: kubewatch.io/v1alpha1
+kind: ResourceConfig
+metadata:
+  name: pod
+  resourceType: Pod
+spec:
+  # Kubernetes resource metadata
+  kubernetes:
+    group: ""  # core/v1
+    version: v1
+    kind: Pod
+    namespaced: true
+    listKind: PodList
+    
+  # Column definitions with templates
+  columns:
+    - name: NAME
+      width: 30
+      flex: true
+      template: "{{ .metadata.name }}"
+      
+    - name: READY
+      width: 8
+      template: |
+        {{- $ready := 0 -}}
+        {{- $total := len .status.containerStatuses -}}
+        {{- range .status.containerStatuses -}}
+          {{- if .ready -}}
+            {{- $ready = add $ready 1 -}}
+          {{- end -}}
+        {{- end -}}
+        {{- if eq $ready $total -}}
+          {{- color "green" (printf "%d/%d" $ready $total) -}}
+        {{- else -}}
+          {{- color "yellow" (printf "%d/%d" $ready $total) -}}
+        {{- end -}}
+        
+    - name: STATUS
+      width: 15
+      template: |
+        {{- $status := .status.phase -}}
+        {{- if eq $status "Running" -}}
+          {{- color "green" $status -}}
+        {{- else if eq $status "Pending" -}}
+          {{- color "yellow" $status -}}
+        {{- else if eq $status "Failed" -}}
+          {{- color "red" $status -}}
+        {{- else if eq $status "Succeeded" -}}
+          {{- color "blue" $status -}}
+        {{- else -}}
+          {{- $status -}}
+        {{- end -}}
+        
+    - name: RESTARTS
+      width: 10
+      template: |
+        {{- $restarts := 0 -}}
+        {{- range .status.containerStatuses -}}
+          {{- $restarts = add $restarts .restartCount -}}
+        {{- end -}}
+        {{- if gt $restarts 5 -}}
+          {{- color "red" $restarts -}}
+        {{- else if gt $restarts 0 -}}
+          {{- color "yellow" $restarts -}}
+        {{- else -}}
+          {{- $restarts -}}
+        {{- end -}}
+        
+    - name: AGE
+      width: 10
+      template: "{{ ago .metadata.creationTimestamp }}"
+      
+    - name: CPU
+      width: 8
+      template: |
+        {{- if .metrics -}}
+          {{- millicores .metrics.cpu -}}
+        {{- else -}}
+          -
+        {{- end -}}
+      conditional: showMetrics
+      
+    - name: MEM
+      width: 8
+      template: |
+        {{- if .metrics -}}
+          {{- humanizeBytes .metrics.memory -}}
+        {{- else -}}
+          -
+        {{- end -}}
+      conditional: showMetrics
+      
+    - name: NODE
+      width: 20
+      template: "{{ .spec.nodeName | default \"-\" }}"
+      optional: true
+      
+    - name: NAMESPACE
+      width: 15
+      template: "{{ .metadata.namespace }}"
+      conditional: showNamespace
+      
+  # Operations configuration
+  operations:
+    describe:
+      enabled: true
+      command: "kubectl describe pod {{ .metadata.name }} -n {{ .metadata.namespace }}"
+      
+    logs:
+      enabled: true
+      command: "kubectl logs {{ .metadata.name }} -n {{ .metadata.namespace }}"
+      followSupported: true
+      
+    exec:
+      enabled: true
+      command: "kubectl exec -it {{ .metadata.name }} -n {{ .metadata.namespace }} -- /bin/sh"
+      
+    delete:
+      enabled: true
+      confirmRequired: true
+      command: "kubectl delete pod {{ .metadata.name }} -n {{ .metadata.namespace }}"
+      
+    edit:
+      enabled: true
+      command: "kubectl edit pod {{ .metadata.name }} -n {{ .metadata.namespace }}"
+      
+  # Grouping configuration
+  grouping:
+    enabled: true
+    key: "{{ .metadata.labels.app | default .metadata.labels.name | default .metadata.name }}"
+    aggregation:
+      - column: NAME
+        template: "{{ .group.key }} ({{ len .group.resources }})"
+      - column: READY
+        template: |
+          {{- $totalReady := 0 -}}
+          {{- $totalContainers := 0 -}}
+          {{- range .group.resources -}}
+            {{- range .status.containerStatuses -}}
+              {{- $totalContainers = add $totalContainers 1 -}}
+              {{- if .ready -}}
+                {{- $totalReady = add $totalReady 1 -}}
+              {{- end -}}
+            {{- end -}}
+          {{- end -}}
+          {{ $totalReady }}/{{ $totalContainers }}
+          
+  # Shared formatters reference
+  formatters:
+    - ref: "k8s-common"  # References shared formatters like age, bytes, etc.
+    - ref: "status-colors"  # References shared status color mappings

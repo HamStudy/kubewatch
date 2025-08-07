@@ -122,8 +122,8 @@ func (rv *ResourceView) initializeNewComponents() {
 	}
 	rv.tableComponent = table.New(columns)
 
-	// Enable new components by default
-	rv.useNewComponents = true
+	// Disable new components for now (they're not fully implemented)
+	rv.useNewComponents = false
 }
 
 // NewResourceViewWithMultiContext creates a new resource view with multi-context support
@@ -778,13 +778,13 @@ func (v *ResourceView) renderCustomTable() string {
 	headerRow := strings.Join(headerCells, " ")
 
 	// Style the header with border
+	// Don't set a fixed width constraint that might truncate the header
 	headerStyle := lipgloss.NewStyle().
 		Bold(true).
 		Foreground(lipgloss.Color("7")).
 		BorderBottom(true).
 		BorderStyle(lipgloss.NormalBorder()).
-		BorderForeground(lipgloss.Color("240")).
-		Width(v.width)
+		BorderForeground(lipgloss.Color("240"))
 	styledHeader := headerStyle.Render(headerRow)
 
 	// Calculate viewport
@@ -882,16 +882,28 @@ func (v *ResourceView) styleCellByColumn(columnName, value string, width int, is
 	displayValue := value
 	actualWidth := width
 
+	// Debug output for testing
+	if len(value) > 30 { // Only for long values
+		fmt.Printf("DEBUG styleCellByColumn: column=%s, wordWrap=%v, value_len=%d, width=%d\n",
+			columnName, v.wordWrap, len(value), width)
+	}
+
 	if v.wordWrap {
-		// When wrap is ON, respect the column width and truncate if needed
+		// When wrap is ON, truncate content to fit within column width
+		// (since we can't do multi-line wrapping in table cells)
 		if len(value) > width-2 && width > 5 {
 			displayValue = value[:width-5] + "..."
+			if len(value) > 30 {
+				fmt.Printf("DEBUG: Truncated to: %s\n", displayValue)
+			}
 		}
 	} else {
-		// When wrap is OFF, don't truncate - show full content
-		// Adjust width if content is longer
+		// When wrap is OFF, show full content by expanding column width
 		if len(value) > width {
 			actualWidth = len(value) + 2
+			if len(value) > 30 {
+				fmt.Printf("DEBUG: Expanded width to: %d\n", actualWidth)
+			}
 		}
 	}
 
@@ -1097,6 +1109,11 @@ func (v *ResourceView) calculateColumnWidths() {
 		return
 	}
 
+	// Debug output
+	if len(v.headers) >= 5 {
+		fmt.Printf("DEBUG calculateColumnWidths: wordWrap=%v\n", v.wordWrap)
+	}
+
 	// Initialize with header widths
 	v.columnWidths = make([]int, len(v.headers))
 	for i, header := range v.headers {
@@ -1108,6 +1125,29 @@ func (v *ResourceView) calculateColumnWidths() {
 		for i, cell := range row {
 			if i < len(v.columnWidths) {
 				cellLen := len(cell) + 2
+
+				// If word wrap is enabled, don't expand columns beyond a reasonable limit
+				if v.wordWrap {
+					// Set reasonable maximum widths for different column types
+					maxWidth := 30 // Default max width when word wrap is on
+					if i < len(v.headers) {
+						header := v.headers[i]
+						switch header {
+						case "NAME":
+							maxWidth = 25
+						case "STATUS":
+							maxWidth = 20
+						case "READY", "RESTARTS", "AGE", "CPU", "MEMORY":
+							maxWidth = 15
+						default:
+							maxWidth = 30
+						}
+					}
+					if cellLen > maxWidth {
+						cellLen = maxWidth
+					}
+				}
+
 				if cellLen > v.columnWidths[i] {
 					v.columnWidths[i] = cellLen
 				}

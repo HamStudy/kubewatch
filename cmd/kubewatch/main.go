@@ -184,13 +184,19 @@ func parseContexts(flags *CLIFlags) ([]string, error) {
 	if flags.context != "" {
 		if strings.Contains(flags.context, ",") {
 			// Multiple contexts specified
-			contexts = strings.Split(flags.context, ",")
-			for i, ctx := range contexts {
-				contexts[i] = strings.TrimSpace(ctx)
+			parts := strings.Split(flags.context, ",")
+			for _, ctx := range parts {
+				trimmed := strings.TrimSpace(ctx)
+				if trimmed != "" { // Only add non-empty contexts
+					contexts = append(contexts, trimmed)
+				}
 			}
 		} else {
 			// Single context specified
-			contexts = []string{strings.TrimSpace(flags.context)}
+			trimmed := strings.TrimSpace(flags.context)
+			if trimmed != "" { // Only add non-empty context
+				contexts = []string{trimmed}
+			}
 		}
 	}
 

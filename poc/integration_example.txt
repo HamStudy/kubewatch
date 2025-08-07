@@ -1,0 +1,284 @@
+package poc
+
+import (
+	"fmt"
+	"log"
+
+	"github.com/HamStudy/kubewatch/internal/components/selection"
+	tmpl "github.com/HamStudy/kubewatch/internal/template"
+	"github.com/HamStudy/kubewatch/internal/transformers"
+)
+
+// TemplateBasedTransformer implements the ResourceTransformer interface
+// using template-driven configuration instead of hardcoded logic
+type TemplateBasedTransformer struct {
+	config  *ResourceConfig
+	manager *ResourceManager
+}
+
+// NewTemplateBasedTransformer creates a transformer from a resource config
+func NewTemplateBasedTransformer(configPath string) (*TemplateBasedTransformer, error) {
+	manager, err := NewResourceManager()
+	if err != nil {
+		return nil, err
+	}
+
+	config, err := manager.LoadConfigFromFile(configPath)
+	if err != nil {
+		return nil, err
+	}
+
+	return &TemplateBasedTransformer{
+		config:  config,
+		manager: manager,
+	}, nil
+}
+
+// GetHeaders implements ResourceTransformer interface
+func (t *TemplateBasedTransformer) GetHeaders(showNamespace bool, multiContext bool) []string {
+	context := map[string]interface{}{
+		"showNamespace": showNamespace,
+		"multiContext":  multiContext,
+		"showMetrics":   true,
+	}
+	return t.manager.GetHeaders(t.config, context)
+}
+
+// TransformToRow implements ResourceTransformer interface
+func (t *TemplateBasedTransformer) TransformToRow(resource interface{}, showNamespace bool, templateEngine *tmpl.Engine) ([]string, *selection.ResourceIdentity, error) {
+	context := map[string]interface{}{
+		"showNamespace": showNamespace,
+		"showMetrics":   true,
+	}
+
+	row, err := t.manager.RenderTableRow(t.config, resource, context)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// Extract resource identity from the resource
+	identity := extractResourceIdentity(resource, t.config.Spec.Kubernetes.Kind)
+
+	return row, identity, nil
+}
+
+// GetSortValue implements ResourceTransformer interface
+func (t *TemplateBasedTransformer) GetSortValue(resource interface{}, column string) interface{} {
+	// Find the column and execute its template
+	for _, col := range t.config.Spec.Columns {
+		if col.Name == column {
+			result, err := t.manager.templateEngine.Execute(col.Template, resource)
+			if err != nil {
+				return ""
+			}
+			return result
+		}
+	}
+	return ""
+}
+
+// GetResourceType implements ResourceTransformer interface
+func (t *TemplateBasedTransformer) GetResourceType() string {
+	return t.config.Metadata.ResourceType
+}
+
+// GetUniqKey implements ResourceTransformer interface
+func (t *TemplateBasedTransformer) GetUniqKey(resource interface{}, templateEngine *tmpl.Engine) (string, error) {
+	if !t.config.Spec.Grouping.Enabled {
+		return "", nil
+	}
+
+	result, err := templateEngine.Execute(t.config.Spec.Grouping.Key, resource)
+	if err != nil {
+		return "", err
+	}
+
+	return result, nil
+}
+
+// CanGroup implements ResourceTransformer interface
+func (t *TemplateBasedTransformer) CanGroup() bool {
+	return t.config.Spec.Grouping.Enabled
+}
+
+// AggregateResources implements ResourceTransformer interface
+func (t *TemplateBasedTransformer) AggregateResources(resources []interface{}, showNamespace bool, multiContext bool, templateEngine *tmpl.Engine) ([]string, *selection.ResourceIdentity, error) {
+	// Create aggregation context
+	aggregationContext := map[string]interface{}{
+		"group": map[string]interface{}{
+			"resources": resources,
+			"count":     len(resources),
+		},
+		"showNamespace": showNamespace,
+		"multiContext":  multiContext,
+	}
+
+	var row []string
+
+	// Process each aggregation column
+	for _, aggCol := range t.config.Spec.Grouping.Aggregation {
+		result, err := templateEngine.Execute(aggCol.Template, aggregationContext)
+		if err != nil {
+			return nil, nil, err
+		}
+		row = append(row, result)
+	}
+
+	// Create a composite identity for the group
+	identity := &selection.ResourceIdentity{
+		Name:      fmt.Sprintf("group-%d-resources", len(resources)),
+		Namespace: extractNamespace(resources[0]),
+		Kind:      t.config.Spec.Kubernetes.Kind,
+		UID:       fmt.Sprintf("group-%v", resources[0]),
+	}
+
+	return row, identity, nil
+}
+
+// Helper function to extract resource identity
+func extractResourceIdentity(resource interface{}, kind string) *selection.ResourceIdentity {
+	// This would use reflection or type assertions to extract metadata
+	// For POC, returning a simple example
+	return &selection.ResourceIdentity{
+		Name:      "example-resource",
+		Namespace: "default",
+		Kind:      kind,
+		UID:       "uid-123",
+	}
+}
+
+// Helper function to extract namespace
+func extractNamespace(resource interface{}) string {
+	// This would extract namespace from resource metadata
+	return "default"
+}
+
+// IntegrateWithRegistry shows how to integrate template-based transformers
+// with the existing transformer registry
+func IntegrateWithRegistry() {
+	registry := transformers.NewRegistry()
+
+	// Load all resource configs from a directory
+	configs, err := LoadResourceConfigs("./resources")
+	if err != nil {
+		log.Printf("Warning: Failed to load configs: %v", err)
+	}
+
+	// Register template-based transformers for each config
+	for resourceType, config := range configs {
+		transformer := &TemplateBasedTransformer{
+			config:  config,
+			manager: mustNewResourceManager(),
+		}
+		registry.Register(resourceType, transformer)
+		fmt.Printf("Registered template-based transformer for: %s\n", resourceType)
+	}
+
+	// Now the registry can be used with resource_view.go
+	// The resource view doesn't need to know if the transformer
+	// is hardcoded or template-based
+}
+
+func mustNewResourceManager() *ResourceManager {
+	rm, err := NewResourceManager()
+	if err != nil {
+		panic(err)
+	}
+	return rm
+}
+
+// Example of how resource_view.go would use this
+func ExampleResourceViewIntegration() {
+	// In resource_view.go, the code would look like:
+	/*
+		func (rv *ResourceView) renderResource(resource interface{}) {
+			// Get the appropriate transformer
+			transformer, exists := rv.transformerRegistry.Get(rv.state.ResourceType)
+			if !exists {
+				// Fall back to generic rendering
+				return
+			}
+
+			// Transform to row - works the same whether it's template-based or hardcoded
+			row, identity, err := transformer.TransformToRow(
+				resource,
+				rv.state.ShowNamespace,
+				rv.templateEngine,
+			)
+			if err != nil {
+				log.Printf("Error transforming resource: %v", err)
+				return
+			}
+
+			// Add to table
+			rv.rows = append(rv.rows, row)
+			rv.resourceMap[len(rv.rows)-1] = identity
+		}
+	*/
+	fmt.Println("Resource view integration example - see comments in code")
+}
+
+// DynamicResourceHandling shows how to handle any resource type dynamically
+func DynamicResourceHandling() {
+	fmt.Println("\n=== Dynamic Resource Handling ===")
+
+	// This demonstrates how kubewatch can handle ANY Kubernetes resource type
+	// without needing to modify the code
+
+	manager, _ := NewResourceManager()
+
+	// Load a config for a CRD (Custom Resource Definition)
+	crdConfig := `
+apiVersion: kubewatch.io/v1alpha1
+kind: ResourceConfig
+metadata:
+  name: my-custom-resource
+  resourceType: MyCustomResource
+spec:
+  kubernetes:
+    group: example.com
+    version: v1
+    kind: MyCustomResource
+    namespaced: true
+  columns:
+    - name: NAME
+      template: "{{ .metadata.name }}"
+    - name: STATUS
+      template: "{{ .status.phase | default \"Unknown\" }}"
+    - name: AGE
+      template: "{{ ago .metadata.creationTimestamp }}"
+`
+
+	config, err := manager.LoadConfig(crdConfig)
+	if err != nil {
+		log.Printf("Error loading CRD config: %v", err)
+		return
+	}
+
+	fmt.Printf("Loaded config for CRD: %s\n", config.Metadata.ResourceType)
+	fmt.Printf("GVR: %v\n", manager.GetGVR(config))
+	fmt.Println("This CRD can now be displayed in kubewatch without any code changes!")
+}
+
+func main() {
+	fmt.Println("=== Template-Based Transformer Integration ===\n")
+
+	// Show registry integration
+	fmt.Println("1. Registry Integration:")
+	IntegrateWithRegistry()
+
+	// Show resource view integration
+	fmt.Println("\n2. Resource View Integration:")
+	ExampleResourceViewIntegration()
+
+	// Show dynamic resource handling
+	DynamicResourceHandling()
+
+	fmt.Println("\n=== Integration Complete ===")
+	fmt.Println("\nBenefits of Template-Driven Approach:")
+	fmt.Println("✓ No code changes needed to support new resource types")
+	fmt.Println("✓ Users can customize display without rebuilding")
+	fmt.Println("✓ CRDs automatically supported with config files")
+	fmt.Println("✓ Consistent with existing transformer interface")
+	fmt.Println("✓ Templates can be embedded or loaded at runtime")
+}
