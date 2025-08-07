@@ -6,10 +6,17 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/HamStudy/kubewatch/internal/components/selection"
+	"github.com/HamStudy/kubewatch/internal/components/style"
+	"github.com/HamStudy/kubewatch/internal/components/table"
+	"github.com/HamStudy/kubewatch/internal/config"
 	"github.com/HamStudy/kubewatch/internal/core"
 	"github.com/HamStudy/kubewatch/internal/k8s"
+	"github.com/HamStudy/kubewatch/internal/template"
+	"github.com/HamStudy/kubewatch/internal/transformers"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	appsv1 "k8s.io/api/apps/v1"
@@ -18,16 +25,8 @@ import (
 )
 
 // ResourceView displays a list of Kubernetes resources
-// ResourceIdentity uniquely identifies a Kubernetes resource
-type ResourceIdentity struct {
-	Context   string // Kubernetes context (for multi-context mode)
-	Namespace string // Kubernetes namespace
-	Name      string // Resource name
-	UID       string // Kubernetes UID (most unique identifier)
-	Kind      string // Resource kind (Pod, Deployment, etc.)
-}
-
 type ResourceView struct {
+	mu               sync.RWMutex // Protects concurrent access to all fields
 	state            *core.State
 	k8sClient        *k8s.Client
 	width            int
@@ -44,7 +43,16 @@ type ResourceView struct {
 	isMultiContext    bool
 	showContextColumn bool
 
-	// Custom table data
+	// New refactored components
+	tableComponent      *table.Model
+	selectionTracker    *selection.Tracker
+	styleManager        *style.Manager
+	templateEngine      *template.Engine
+	transformerRegistry *transformers.Registry
+	config              *config.Config
+	useNewComponents    bool // Toggle for gradual rollout
+
+	// Legacy table data (will be phased out)
 	headers        []string
 	rows           [][]string
 	columnWidths   []int
@@ -53,8 +61,8 @@ type ResourceView struct {
 	viewportHeight int
 
 	// Selection tracking
-	selectedIdentity *ResourceIdentity         // Track the actual selected resource
-	resourceMap      map[int]*ResourceIdentity // Map row index to resource identity
+	selectedIdentity *selection.ResourceIdentity         // Track the actual selected resource
+	resourceMap      map[int]*selection.ResourceIdentity // Map row index to resource identity
 }
 
 // NewResourceView creates a new resource view
@@ -68,13 +76,48 @@ func NewResourceView(state *core.State, k8sClient *k8s.Client) *ResourceView {
 		selectedRow:       0,
 		isMultiContext:    false,
 		showContextColumn: false,
-		resourceMap:       make(map[int]*ResourceIdentity),
+		resourceMap:       make(map[int]*selection.ResourceIdentity),
 	}
+
+	// Initialize new refactored components
+	rv.initializeNewComponents()
 
 	// Set initial columns based on resource type
 	rv.updateColumnsForResourceType()
 
 	return rv
+}
+
+// initializeNewComponents initializes the new refactored components
+func (rv *ResourceView) initializeNewComponents() {
+	// Initialize selection tracker
+	rv.selectionTracker = selection.New()
+
+	// Initialize style manager
+	rv.styleManager = style.NewManager()
+
+	// Initialize template engine
+	rv.templateEngine = template.NewEngine()
+
+	// Initialize transformer registry
+	rv.transformerRegistry = transformers.GetDefaultRegistry()
+
+	// Initialize configuration (with defaults for now)
+	rv.config = &config.Config{
+		Theme:   "default",
+		Columns: make(map[string]*config.ColumnConfig),
+	}
+
+	// Initialize table component with basic columns
+	columns := []table.Column{
+		{Title: "NAME", Width: 20, Flex: true},
+		{Title: "STATUS", Width: 15},
+		{Title: "AGE", Width: 10},
+	}
+	rv.tableComponent = table.New(columns)
+
+	// Enable new components by default
+	rv.useNewComponents = true
 }
 
 // NewResourceViewWithMultiContext creates a new resource view with multi-context support
@@ -88,7 +131,7 @@ func NewResourceViewWithMultiContext(state *core.State, multiClient *k8s.MultiCo
 		selectedRow:       0,
 		isMultiContext:    true,
 		showContextColumn: true,
-		resourceMap:       make(map[int]*ResourceIdentity),
+		resourceMap:       make(map[int]*selection.ResourceIdentity),
 	}
 
 	// Set initial columns based on resource type
@@ -172,9 +215,39 @@ func (v *ResourceView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // View renders the view
 func (v *ResourceView) View() string {
 	header := v.renderHeader()
-	// Use custom renderer instead of table.View()
+
+	// Use new table component if enabled and available
+	if v.useNewComponents && v.tableComponent != nil && v.config != nil {
+		tableView := v.renderWithNewComponents()
+		if tableView != "" {
+			return lipgloss.JoinVertical(lipgloss.Left, header, tableView)
+		}
+	}
+
+	// Fall back to legacy custom renderer
 	tableView := v.renderCustomTable()
 	return lipgloss.JoinVertical(lipgloss.Left, header, tableView)
+}
+
+// renderWithNewComponents renders the table using the new refactored components
+func (v *ResourceView) renderWithNewComponents() string {
+	if v.tableComponent == nil {
+		return ""
+	}
+
+	// Set table size to match our dimensions
+	v.tableComponent.SetSize(v.width, v.height-6) // Account for header space
+
+	// Sync selection with new table component
+	if v.selectionTracker != nil {
+		selectedRow := v.selectionTracker.GetSelectedRow()
+		if selectedRow != v.selectedRow {
+			v.tableComponent.SetSelectedIndex(v.selectedRow)
+		}
+	}
+
+	// Render the new table component
+	return v.tableComponent.View()
 }
 
 // SetSize updates the view size
@@ -488,6 +561,9 @@ func (v *ResourceView) saveSelectedIdentity() {
 
 // updateSelectedIdentity updates the selected identity when selection changes
 func (v *ResourceView) updateSelectedIdentity() {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+
 	if v.selectedRow >= 0 && v.selectedRow < len(v.rows) {
 		if identity, exists := v.resourceMap[v.selectedRow]; exists {
 			v.selectedIdentity = identity
@@ -496,7 +572,7 @@ func (v *ResourceView) updateSelectedIdentity() {
 }
 
 // findResourceByIdentity searches for a resource by its identity and returns the row index
-func (v *ResourceView) findResourceByIdentity(identity *ResourceIdentity) int {
+func (v *ResourceView) findResourceByIdentity(identity *selection.ResourceIdentity) int {
 	if identity == nil {
 		return -1
 	}
@@ -1193,7 +1269,7 @@ func (v *ResourceView) updateTableWithPods(pods []v1.Pod) {
 
 	// Clear and rebuild rows and resource map
 	v.rows = [][]string{}
-	v.resourceMap = make(map[int]*ResourceIdentity)
+	v.resourceMap = make(map[int]*selection.ResourceIdentity)
 
 	for _, pod := range pods {
 		// Calculate ready containers
@@ -1278,7 +1354,7 @@ func (v *ResourceView) updateTableWithPods(pods []v1.Pod) {
 
 		// Create resource identity for this row
 		rowIndex := len(v.rows) - 1
-		identity := &ResourceIdentity{
+		identity := &selection.ResourceIdentity{
 			Context:   "", // Single context mode
 			Namespace: pod.Namespace,
 			Name:      pod.Name,
@@ -1728,11 +1804,14 @@ func (v *ResourceView) updateTableWithSecrets(secrets []v1.Secret) {
 // rowWithIdentity pairs a table row with its resource identity for sorting
 type rowWithIdentity struct {
 	row      []string
-	identity *ResourceIdentity
+	identity *selection.ResourceIdentity
 }
 
 // sortRows sorts the table rows based on the current sort configuration
 func (v *ResourceView) sortRows() {
+	// Note: This method is called from within updateTableWithPodsMultiContext which already holds the lock
+	// So we don't need to acquire the lock here to avoid deadlock
+
 	if len(v.rows) <= 1 {
 		return
 	}
@@ -1801,7 +1880,7 @@ func (v *ResourceView) sortRows() {
 
 	// Rebuild rows and resourceMap with the sorted order
 	v.rows = make([][]string, len(rowsWithIdentities))
-	v.resourceMap = make(map[int]*ResourceIdentity)
+	v.resourceMap = make(map[int]*selection.ResourceIdentity)
 	for i, item := range rowsWithIdentities {
 		v.rows[i] = item.row
 		if item.identity != nil {
@@ -1941,6 +2020,9 @@ func (v *ResourceView) parseAgeToSeconds(age string) float64 {
 // Multi-context table update methods
 
 func (v *ResourceView) updateTableWithPodsMultiContext(podsWithContext []k8s.PodWithContext) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+
 	// Update columns for pods with context column
 	v.updateColumnsForResourceType()
 
@@ -1961,7 +2043,7 @@ func (v *ResourceView) updateTableWithPodsMultiContext(podsWithContext []k8s.Pod
 
 	// Clear and rebuild rows and resource map
 	v.rows = [][]string{}
-	v.resourceMap = make(map[int]*ResourceIdentity)
+	v.resourceMap = make(map[int]*selection.ResourceIdentity)
 	newSelectedRow := -1
 
 	for _, pwc := range podsWithContext {
@@ -2050,7 +2132,7 @@ func (v *ResourceView) updateTableWithPodsMultiContext(podsWithContext []k8s.Pod
 
 		// Create resource identity for this row
 		rowIndex := len(v.rows) - 1
-		identity := &ResourceIdentity{
+		identity := &selection.ResourceIdentity{
 			Context:   context,
 			Namespace: pod.Namespace,
 			Name:      pod.Name,
@@ -2172,13 +2254,13 @@ func (v *ResourceView) SetTestData(headers []string, rows [][]string) {
 
 	// Initialize resource map if needed
 	if v.resourceMap == nil {
-		v.resourceMap = make(map[int]*ResourceIdentity)
+		v.resourceMap = make(map[int]*selection.ResourceIdentity)
 	}
 
 	// Create resource identities for each row
 	for i, row := range rows {
 		if len(row) > 0 {
-			v.resourceMap[i] = &ResourceIdentity{
+			v.resourceMap[i] = &selection.ResourceIdentity{
 				Context:   v.state.CurrentContext,
 				Namespace: v.state.CurrentNamespace,
 				Name:      row[0], // First column is always the name
@@ -2191,10 +2273,133 @@ func (v *ResourceView) SetTestData(headers []string, rows [][]string) {
 
 // SetSelectedRow sets the selected row index (for testing purposes)
 func (v *ResourceView) SetSelectedRow(row int) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+
 	v.selectedRow = row
 	if row >= 0 && row < len(v.resourceMap) {
 		v.selectedIdentity = v.resourceMap[row]
 	}
+}
+
+// updateTableWithNewComponents uses the new refactored components to update the table
+func (rv *ResourceView) updateTableWithNewComponents(resources []interface{}) error {
+	if rv.transformerRegistry == nil || rv.templateEngine == nil {
+		// Fall back to legacy method if new components aren't initialized
+		return fmt.Errorf("new components not initialized")
+	}
+
+	resourceType := string(rv.state.CurrentResourceType)
+	// Convert plural resource type to singular for transformer lookup
+	transformerKey := resourceType
+	switch resourceType {
+	case "Pods":
+		transformerKey = "Pod"
+	case "Deployments":
+		transformerKey = "Deployment"
+	case "StatefulSets":
+		transformerKey = "StatefulSet"
+	case "Services":
+		transformerKey = "Service"
+	case "Ingresses":
+		transformerKey = "Ingress"
+	case "ConfigMaps":
+		transformerKey = "ConfigMap"
+	case "Secrets":
+		transformerKey = "Secret"
+	}
+
+	transformer, exists := rv.transformerRegistry.Get(transformerKey)
+	if !exists {
+		return fmt.Errorf("no transformer found for resource type: %s", transformerKey)
+	}
+
+	// Determine display options
+	showNamespace := rv.state.CurrentNamespace == "" || rv.state.CurrentNamespace == "all"
+	multiContext := rv.isMultiContext
+
+	// Get headers from transformer
+	headers := transformer.GetHeaders(showNamespace, multiContext)
+
+	// Convert resources to table rows using transformers
+	var tableRows []table.Row
+	var resourceIdentities []*selection.ResourceIdentity
+
+	for i, resource := range resources {
+		rowData, identity, err := transformer.TransformToRow(resource, showNamespace, rv.templateEngine)
+		if err != nil {
+			// Log error but continue with other resources
+			continue
+		}
+
+		// Create table row
+		tableRow := table.Row{
+			ID:     fmt.Sprintf("resource-%d", i),
+			Values: rowData,
+			Style:  lipgloss.NewStyle(), // Default style, can be customized later
+		}
+
+		tableRows = append(tableRows, tableRow)
+		resourceIdentities = append(resourceIdentities, identity)
+	}
+
+	// Update the new table component
+	rv.tableComponent.SetRows(tableRows)
+
+	// Update selection tracker
+	resourceMap := make(map[int]*selection.ResourceIdentity)
+	for i, identity := range resourceIdentities {
+		resourceMap[i] = identity
+	}
+	rv.selectionTracker.SetResourceMap(resourceMap)
+
+	// Update legacy structures for backward compatibility
+	rv.headers = headers
+	rv.rows = make([][]string, len(tableRows))
+	rv.resourceMap = make(map[int]*selection.ResourceIdentity)
+
+	for i, row := range tableRows {
+		rv.rows[i] = row.Values
+		if i < len(resourceIdentities) {
+			rv.resourceMap[i] = resourceIdentities[i]
+		}
+	}
+
+	// Calculate column widths for legacy compatibility
+	rv.calculateColumnWidths()
+
+	return nil
+}
+
+// EnableNewComponents enables the new refactored components for rendering
+func (rv *ResourceView) EnableNewComponents() {
+	rv.useNewComponents = true
+}
+
+// DisableNewComponents disables the new refactored components, falling back to legacy rendering
+func (rv *ResourceView) DisableNewComponents() {
+	rv.useNewComponents = false
+}
+
+// IsUsingNewComponents returns whether new components are currently enabled
+func (rv *ResourceView) IsUsingNewComponents() bool {
+	return rv.useNewComponents
+}
+
+// TryUpdateWithNewComponents attempts to update the table using new components
+// Returns true if successful, false if it falls back to legacy methods
+func (rv *ResourceView) TryUpdateWithNewComponents(resources []interface{}) bool {
+	if !rv.useNewComponents {
+		return false
+	}
+
+	err := rv.updateTableWithNewComponents(resources)
+	if err != nil {
+		// Log error and fall back to legacy method
+		return false
+	}
+
+	return true
 }
 
 // Message types

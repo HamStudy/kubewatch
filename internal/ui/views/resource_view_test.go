@@ -4,8 +4,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/HamStudy/kubewatch/internal/components/selection"
+	"github.com/HamStudy/kubewatch/internal/components/table"
 	"github.com/HamStudy/kubewatch/internal/core"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -49,22 +52,22 @@ func createTestResourceViewWithData(t *testing.T) *ResourceView {
 	}
 
 	// Set up resource map for selection tracking
-	rv.resourceMap = make(map[int]*ResourceIdentity)
-	rv.resourceMap[0] = &ResourceIdentity{
+	rv.resourceMap = make(map[int]*selection.ResourceIdentity)
+	rv.resourceMap[0] = &selection.ResourceIdentity{
 		Context:   "test-context",
 		Namespace: "default",
 		Name:      "test-pod-1",
 		UID:       "uid-1",
 		Kind:      "Pod",
 	}
-	rv.resourceMap[1] = &ResourceIdentity{
+	rv.resourceMap[1] = &selection.ResourceIdentity{
 		Context:   "test-context",
 		Namespace: "default",
 		Name:      "test-pod-2",
 		UID:       "uid-2",
 		Kind:      "Pod",
 	}
-	rv.resourceMap[2] = &ResourceIdentity{
+	rv.resourceMap[2] = &selection.ResourceIdentity{
 		Context:   "test-context",
 		Namespace: "default",
 		Name:      "test-pod-3",
@@ -74,6 +77,16 @@ func createTestResourceViewWithData(t *testing.T) *ResourceView {
 
 	rv.selectedRow = 0
 	rv.selectedIdentity = rv.resourceMap[0]
+
+	// If new components are enabled, populate the table component with test data
+	if rv.useNewComponents && rv.tableComponent != nil {
+		tableRows := []table.Row{
+			{ID: "resource-0", Values: []string{"test-pod-1", "1/1", "Running", "0", "5m"}, Style: lipgloss.NewStyle()},
+			{ID: "resource-1", Values: []string{"test-pod-2", "0/1", "Pending", "0", "2m"}, Style: lipgloss.NewStyle()},
+			{ID: "resource-2", Values: []string{"test-pod-3", "1/1", "Running", "1", "10m"}, Style: lipgloss.NewStyle()},
+		}
+		rv.tableComponent.SetRows(tableRows)
+	}
 
 	return rv
 }
@@ -179,21 +192,21 @@ func TestResourceViewSelectionTracking(t *testing.T) {
 	}
 
 	// Update resource map to reflect new order
-	rv.resourceMap[0] = &ResourceIdentity{
+	rv.resourceMap[0] = &selection.ResourceIdentity{
 		Context:   "test-context",
 		Namespace: "default",
 		Name:      "test-pod-3",
 		UID:       "uid-3",
 		Kind:      "Pod",
 	}
-	rv.resourceMap[1] = &ResourceIdentity{
+	rv.resourceMap[1] = &selection.ResourceIdentity{
 		Context:   "test-context",
 		Namespace: "default",
 		Name:      "test-pod-2",
 		UID:       "uid-2",
 		Kind:      "Pod",
 	}
-	rv.resourceMap[2] = &ResourceIdentity{
+	rv.resourceMap[2] = &selection.ResourceIdentity{
 		Context:   "test-context",
 		Namespace: "default",
 		Name:      "test-pod-1",
@@ -358,7 +371,7 @@ func TestResourceViewPagination(t *testing.T) {
 			"0",
 			"1m",
 		})
-		rv.resourceMap[i-1] = &ResourceIdentity{
+		rv.resourceMap[i-1] = &selection.ResourceIdentity{
 			Context:   "test-context",
 			Namespace: "default",
 			Name:      "test-pod-" + string(rune('0'+i)),
@@ -497,21 +510,21 @@ func TestResourceViewSelectionJumpingBugDuringRefresh(t *testing.T) {
 					{"test-pod-2", "0/1", "Pending", "0", "2m"}, // Selected pod moved to index 2
 				}
 				// Update resource map to reflect new order
-				rv.resourceMap[0] = &ResourceIdentity{
+				rv.resourceMap[0] = &selection.ResourceIdentity{
 					Context:   "test-context",
 					Namespace: "default",
 					Name:      "test-pod-3",
 					UID:       "uid-3",
 					Kind:      "Pod",
 				}
-				rv.resourceMap[1] = &ResourceIdentity{
+				rv.resourceMap[1] = &selection.ResourceIdentity{
 					Context:   "test-context",
 					Namespace: "default",
 					Name:      "test-pod-1",
 					UID:       "uid-1",
 					Kind:      "Pod",
 				}
-				rv.resourceMap[2] = &ResourceIdentity{
+				rv.resourceMap[2] = &selection.ResourceIdentity{
 					Context:   "test-context",
 					Namespace: "default",
 					Name:      "test-pod-2",
@@ -533,15 +546,15 @@ func TestResourceViewSelectionJumpingBugDuringRefresh(t *testing.T) {
 					{"test-pod-3", "1/1", "Running", "1", "10m"},
 				}
 				// Update resource map
-				rv.resourceMap = make(map[int]*ResourceIdentity)
-				rv.resourceMap[0] = &ResourceIdentity{
+				rv.resourceMap = make(map[int]*selection.ResourceIdentity)
+				rv.resourceMap[0] = &selection.ResourceIdentity{
 					Context:   "test-context",
 					Namespace: "default",
 					Name:      "test-pod-1",
 					UID:       "uid-1",
 					Kind:      "Pod",
 				}
-				rv.resourceMap[1] = &ResourceIdentity{
+				rv.resourceMap[1] = &selection.ResourceIdentity{
 					Context:   "test-context",
 					Namespace: "default",
 					Name:      "test-pod-3",
@@ -565,7 +578,7 @@ func TestResourceViewSelectionJumpingBugDuringRefresh(t *testing.T) {
 					{"test-pod-4", "1/1", "Running", "0", "1m"}, // New pod
 				}
 				// Update resource map - keep existing ones
-				rv.resourceMap[3] = &ResourceIdentity{
+				rv.resourceMap[3] = &selection.ResourceIdentity{
 					Context:   "test-context",
 					Namespace: "default",
 					Name:      "test-pod-4",
@@ -588,22 +601,22 @@ func TestResourceViewSelectionJumpingBugDuringRefresh(t *testing.T) {
 					{"new-pod-3", "1/1", "Running", "0", "15s"},
 				}
 				// Update resource map with all new UIDs
-				rv.resourceMap = make(map[int]*ResourceIdentity)
-				rv.resourceMap[0] = &ResourceIdentity{
+				rv.resourceMap = make(map[int]*selection.ResourceIdentity)
+				rv.resourceMap[0] = &selection.ResourceIdentity{
 					Context:   "test-context",
 					Namespace: "default",
 					Name:      "new-pod-1",
 					UID:       "new-uid-1",
 					Kind:      "Pod",
 				}
-				rv.resourceMap[1] = &ResourceIdentity{
+				rv.resourceMap[1] = &selection.ResourceIdentity{
 					Context:   "test-context",
 					Namespace: "default",
 					Name:      "new-pod-2",
 					UID:       "new-uid-2",
 					Kind:      "Pod",
 				}
-				rv.resourceMap[2] = &ResourceIdentity{
+				rv.resourceMap[2] = &selection.ResourceIdentity{
 					Context:   "test-context",
 					Namespace: "default",
 					Name:      "new-pod-3",
@@ -715,8 +728,8 @@ func TestResourceViewRefreshWithRealTimeUpdates(t *testing.T) {
 				rv.rows = append([][]string{newRow}, rv.rows...)
 
 				// Shift resource map indices
-				newMap := make(map[int]*ResourceIdentity)
-				newMap[0] = &ResourceIdentity{
+				newMap := make(map[int]*selection.ResourceIdentity)
+				newMap[0] = &selection.ResourceIdentity{
 					Context:   "test-context",
 					Namespace: "default",
 					Name:      "test-pod-0",
@@ -1171,9 +1184,9 @@ func TestResourceViewSelectionPersistenceAcrossContextSwitch(t *testing.T) {
 		{"test-pod-3", "1/1", "Running", "1", "10m"},
 	}
 
-	rv.resourceMap = make(map[int]*ResourceIdentity)
+	rv.resourceMap = make(map[int]*selection.ResourceIdentity)
 	for i := 0; i < 3; i++ {
-		rv.resourceMap[i] = &ResourceIdentity{
+		rv.resourceMap[i] = &selection.ResourceIdentity{
 			Context:   "test-context",
 			Namespace: "default",
 			Name:      rv.rows[i][0],
@@ -1297,13 +1310,13 @@ func TestMultiContextSelectionJumpingBug(t *testing.T) {
 		}
 
 		// Set up resource map with context information
-		rv.resourceMap = make(map[int]*ResourceIdentity)
+		rv.resourceMap = make(map[int]*selection.ResourceIdentity)
 		contexts := []string{"prod-cluster", "staging-cluster", "dev-cluster"}
 		names := []string{"api-server-1", "api-server-2", "api-server-3", "database-1", "database-2", "database-3", "worker-1", "worker-2", "worker-3"}
 		uids := []string{"prod-uid-1", "stage-uid-1", "dev-uid-1", "prod-uid-2", "stage-uid-2", "dev-uid-2", "prod-uid-3", "stage-uid-3", "dev-uid-3"}
 
 		for i := 0; i < 9; i++ {
-			rv.resourceMap[i] = &ResourceIdentity{
+			rv.resourceMap[i] = &selection.ResourceIdentity{
 				Context:   contexts[i%3],
 				Namespace: "default",
 				Name:      names[i],
@@ -1402,13 +1415,13 @@ func TestMultiContextSelectionJumpingBug(t *testing.T) {
 		}
 
 		// Store original resource map for later reference
-		originalMap := make(map[int]*ResourceIdentity)
-		originalMap[0] = &ResourceIdentity{Context: "cluster-a", Namespace: "default", Name: "pod-1", UID: "a-1", Kind: "Pod"}
-		originalMap[1] = &ResourceIdentity{Context: "cluster-b", Namespace: "default", Name: "pod-2", UID: "b-1", Kind: "Pod"}
-		originalMap[2] = &ResourceIdentity{Context: "cluster-a", Namespace: "default", Name: "pod-3", UID: "a-2", Kind: "Pod"}
-		originalMap[3] = &ResourceIdentity{Context: "cluster-b", Namespace: "default", Name: "pod-4", UID: "b-2", Kind: "Pod"}
+		originalMap := make(map[int]*selection.ResourceIdentity)
+		originalMap[0] = &selection.ResourceIdentity{Context: "cluster-a", Namespace: "default", Name: "pod-1", UID: "a-1", Kind: "Pod"}
+		originalMap[1] = &selection.ResourceIdentity{Context: "cluster-b", Namespace: "default", Name: "pod-2", UID: "b-1", Kind: "Pod"}
+		originalMap[2] = &selection.ResourceIdentity{Context: "cluster-a", Namespace: "default", Name: "pod-3", UID: "a-2", Kind: "Pod"}
+		originalMap[3] = &selection.ResourceIdentity{Context: "cluster-b", Namespace: "default", Name: "pod-4", UID: "b-2", Kind: "Pod"}
 
-		rv.resourceMap = make(map[int]*ResourceIdentity)
+		rv.resourceMap = make(map[int]*selection.ResourceIdentity)
 		for k, v := range originalMap {
 			rv.resourceMap[k] = v
 		}
@@ -1439,13 +1452,13 @@ func TestMultiContextSelectionJumpingBug(t *testing.T) {
 		}
 
 		// Update resource map
-		newMap := make(map[int]*ResourceIdentity)
-		newMap[0] = &ResourceIdentity{Context: "cluster-a", Namespace: "default", Name: "pod-0", UID: "a-0", Kind: "Pod"}
+		newMap := make(map[int]*selection.ResourceIdentity)
+		newMap[0] = &selection.ResourceIdentity{Context: "cluster-a", Namespace: "default", Name: "pod-0", UID: "a-0", Kind: "Pod"}
 		newMap[1] = originalMap[0] // pod-1
 		newMap[2] = originalMap[1] // pod-2
 		newMap[3] = originalMap[2] // pod-3 (our selected pod, now at index 3)
 		newMap[4] = originalMap[3] // pod-4
-		newMap[5] = &ResourceIdentity{Context: "cluster-b", Namespace: "default", Name: "pod-5", UID: "b-3", Kind: "Pod"}
+		newMap[5] = &selection.ResourceIdentity{Context: "cluster-b", Namespace: "default", Name: "pod-5", UID: "b-3", Kind: "Pod"}
 		rv.resourceMap = newMap
 
 		// Try to restore selection
@@ -1484,11 +1497,11 @@ func TestMultiContextSelectionJumpingBug(t *testing.T) {
 		}
 		rv.rows = initialRows
 
-		rv.resourceMap = make(map[int]*ResourceIdentity)
+		rv.resourceMap = make(map[int]*selection.ResourceIdentity)
 		for i := 0; i < 6; i++ {
 			ctx := []string{"context-1", "context-2", "context-3"}[i%3]
 			name := rv.rows[i][1]
-			rv.resourceMap[i] = &ResourceIdentity{
+			rv.resourceMap[i] = &selection.ResourceIdentity{
 				Context:   ctx,
 				Namespace: "default",
 				Name:      name,
@@ -1498,9 +1511,9 @@ func TestMultiContextSelectionJumpingBug(t *testing.T) {
 		}
 
 		// Store original resource map for reference
-		originalResourceMap := make(map[int]*ResourceIdentity)
+		originalResourceMap := make(map[int]*selection.ResourceIdentity)
 		for k, v := range rv.resourceMap {
-			originalResourceMap[k] = &ResourceIdentity{
+			originalResourceMap[k] = &selection.ResourceIdentity{
 				Context:   v.Context,
 				Namespace: v.Namespace,
 				Name:      v.Name,
@@ -1549,7 +1562,7 @@ func TestMultiContextSelectionJumpingBug(t *testing.T) {
 			t.Run(scenario.name, func(t *testing.T) {
 				// Simulate filtering by updating rows to only show pods from visible contexts
 				var filteredRows [][]string
-				var filteredMap = make(map[int]*ResourceIdentity)
+				var filteredMap = make(map[int]*selection.ResourceIdentity)
 				idx := 0
 
 				for i, row := range initialRows {
@@ -1558,7 +1571,7 @@ func TestMultiContextSelectionJumpingBug(t *testing.T) {
 						if ctx == visibleCtx {
 							filteredRows = append(filteredRows, row)
 							// Copy the original resource identity
-							filteredMap[idx] = &ResourceIdentity{
+							filteredMap[idx] = &selection.ResourceIdentity{
 								Context:   originalResourceMap[i].Context,
 								Namespace: originalResourceMap[i].Namespace,
 								Name:      originalResourceMap[i].Name,
