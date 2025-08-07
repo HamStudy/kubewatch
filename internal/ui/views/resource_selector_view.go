@@ -1,10 +1,11 @@
 package views
 
 import (
+	"strings"
+
 	"github.com/HamStudy/kubewatch/internal/components/dropdown"
 	"github.com/HamStudy/kubewatch/internal/core"
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
 )
 
 // ResourceSelectorView provides a dropdown for selecting resource types
@@ -27,22 +28,36 @@ func NewResourceSelectorView() *ResourceSelectorView {
 		{Label: "Secrets", Value: core.ResourceTypeSecret},
 	}
 
+	// Calculate optimal width based on content
+	maxLabelWidth := 0
+	for _, option := range options {
+		if len(option.Label) > maxLabelWidth {
+			maxLabelWidth = len(option.Label)
+		}
+	}
+	
+	// Add padding for borders and selection indicators
+	optimalWidth := maxLabelWidth + 8 // Account for borders, padding, and styling
+	if optimalWidth < 25 {
+		optimalWidth = 25 // Minimum width for good appearance
+	}
+
 	dropdownModel := dropdown.New(options)
 	dropdownModel.SetTitle("Select Resource Type")
-	dropdownModel.SetSize(25, 10)
+	dropdownModel.SetSize(optimalWidth, 10)
 
 	return &ResourceSelectorView{
 		dropdown: dropdownModel,
-		width:    25,
-		height:   10,
+		width:    80,  // Screen width (will be set by app)
+		height:   24,  // Screen height (will be set by app)
 	}
 }
 
-// SetSize sets the view dimensions
+// SetSize sets the view dimensions (screen size for centering)
 func (v *ResourceSelectorView) SetSize(width, height int) {
 	v.width = width
 	v.height = height
-	v.dropdown.SetSize(width, height)
+	// Keep the dropdown at its optimal size - don't resize it
 }
 
 // SetCurrentResourceType sets the currently selected resource type
@@ -88,16 +103,54 @@ func (v *ResourceSelectorView) View() string {
 		return ""
 	}
 
-	// Center the dropdown on screen
+	// Get the dropdown content
 	dropdownView := v.dropdown.View()
+	if dropdownView == "" {
+		return ""
+	}
 
-	// Calculate centering
-	containerStyle := lipgloss.NewStyle().
-		Width(v.width).
-		Height(v.height).
-		Align(lipgloss.Center, lipgloss.Center)
+	// Calculate the actual width of the dropdown content
+	lines := strings.Split(dropdownView, "\n")
+	dropdownWidth := 0
+	for _, line := range lines {
+		if len(line) > dropdownWidth {
+			dropdownWidth = len(line)
+		}
+	}
+	dropdownHeight := len(lines)
 
-	return containerStyle.Render(dropdownView)
+	// Calculate centering position
+	leftPadding := (v.width - dropdownWidth) / 2
+	if leftPadding < 0 {
+		leftPadding = 0
+	}
+	
+	topPadding := (v.height - dropdownHeight) / 2
+	if topPadding < 0 {
+		topPadding = 0
+	}
+
+	// Create the centered view
+	var result strings.Builder
+	
+	// Add top padding
+	for i := 0; i < topPadding; i++ {
+		result.WriteString("\n")
+	}
+	
+	// Add the dropdown with left padding
+	for i, line := range lines {
+		// Add left padding
+		result.WriteString(strings.Repeat(" ", leftPadding))
+		result.WriteString(line)
+		
+		// Add newline except for the last line
+		if i < len(lines)-1 {
+			result.WriteString("\n")
+		}
+	}
+
+	return result.String()
 }
 
 // ResourceSelectedMsg is sent when a resource type is selected
