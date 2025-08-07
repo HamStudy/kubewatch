@@ -422,6 +422,210 @@ var DefaultTemplates = map[string]string{
 {{- else -}}
   {{- color "red" (toString $count) -}}
 {{- end -}}`,
+
+	// Unique key templates for resource grouping
+	"uniq_key_default": `{{ .Metadata.Name }}`,
+
+	"uniq_key_pod": `{{ .Metadata.Name }}`,
+
+	"uniq_key_deployment": `{{ .Metadata.Name }}_{{ join .ImageList ";" }}`,
+
+	"uniq_key_statefulset": `{{ .Metadata.Name }}_{{ join .ImageList ";" }}`,
+
+	"uniq_key_service": `{{ .Metadata.Name }}`,
+
+	"uniq_key_ingress": `{{ .Metadata.Name }}`,
+
+	"uniq_key_configmap": `{{ .Metadata.Name }}`,
+
+	"uniq_key_secret": `{{ .Metadata.Name }}`,
+
+	// Describe templates for detailed resource information
+	"pod_describe": `{{ bold "Name:" }}             {{ .Name }}
+{{ bold "Namespace:" }}        {{ .Namespace }}
+{{ bold "Priority:" }}         {{ .Priority | default 0 }}
+{{ bold "Service Account:" }}  {{ .Spec.ServiceAccount | default "default" }}
+{{ bold "Node:" }}             {{ .Spec.NodeName }}/{{ .Status.HostIP }}
+{{ bold "Start Time:" }}       {{ .Status.StartTime | timestamp }}
+{{ bold "Labels:" }}           {{ range $k, $v := .Labels }}{{ $k }}={{ $v }}
+                  {{ end }}
+{{ bold "Annotations:" }}      {{ range $k, $v := .Annotations }}{{ $k }}: {{ $v }}
+                  {{ end }}
+{{ bold "Status:" }}           {{ .Status.Phase }}
+{{ bold "IP:" }}               {{ .Status.PodIP }}
+{{ bold "IPs:" }}
+  {{ bold "IP:" }}             {{ .Status.PodIP }}
+{{ bold "Controlled By:" }}    ReplicaSet/{{ .Name }}-abc123
+
+{{ bold "Containers:" }}
+{{ range .Spec.Containers }}  {{ bold .Name }}:
+    {{ bold "Container ID:" }}   containerd://abc123def456...
+    {{ bold "Image:" }}          {{ .Image }}
+    {{ bold "Image ID:" }}       {{ .Image }}@sha256:b3590f10cafc8a250f24b54d49a26a5e88863671c15cb15c417322b8eff6f186
+    {{ bold "Port:" }}           {{ range .Ports }}{{ .ContainerPort }}/{{ .Protocol }}{{ end }}
+    {{ bold "Host Port:" }}      0/TCP
+    {{ bold "State:" }}          Running
+      {{ bold "Started:" }}      {{ $.Status.StartTime | timestamp }}
+    {{ bold "Ready:" }}          True
+    {{ bold "Restart Count:" }}  0
+    {{ bold "Limits:" }}
+{{ range $k, $v := .Resources.Limits }}      {{ $k }}:     {{ $v }}
+{{ end }}    {{ bold "Requests:" }}
+{{ range $k, $v := .Resources.Requests }}      {{ $k }}:     {{ $v }}
+{{ end }}{{ if .LivenessProbe }}    {{ bold "Liveness:" }}  http-get http://:{{ .LivenessProbe.HttpGet.Port }}{{ .LivenessProbe.HttpGet.Path }} delay={{ .LivenessProbe.InitialDelaySeconds }}s timeout={{ .LivenessProbe.TimeoutSeconds }}s period={{ .LivenessProbe.PeriodSeconds }}s #success={{ .LivenessProbe.SuccessThreshold }} #failure={{ .LivenessProbe.FailureThreshold }}{{ end }}
+    {{ bold "Environment:" }}
+      {{ bold "K8S_POD_NAME:" }}  {{ $.Name }} (v1:metadata.name)
+    {{ bold "Mounts:" }}
+      /var/run/secrets/kubernetes.io/serviceaccount from kube-api-access-token (ro)
+{{ end }}
+
+{{ bold "Conditions:" }}
+  {{ bold "Type" | printf "%-27s" }} {{ bold "Status" }}
+{{ range .Status.Conditions }}  {{ .Type | printf "%-27s" }} {{ .Status }}
+{{ end }}
+
+{{ bold "Volumes:" }}
+{{ range .Spec.Volumes }}  {{ bold .Name }}:
+    {{ bold "Type:" }}                    Projected (a volume that contains injected data from multiple sources)
+    {{ bold "TokenExpirationSeconds:" }}  3607
+    {{ bold "ConfigMapName:" }}           kube-root-ca.crt
+    {{ bold "ConfigMapOptional:" }}       <nil>
+    {{ bold "DownwardAPI:" }}             true
+{{ end }}
+{{ bold "QoS Class:" }}                   Burstable
+{{ bold "Node-Selectors:" }}              <none>
+{{ bold "Tolerations:" }}                 node.kubernetes.io/not-ready:NoExecute op=Exists for 300s
+                             node.kubernetes.io/unreachable:NoExecute op=Exists for 300s
+
+{{ bold "Events:" }}
+  {{ bold "Type" | printf "%-6s" }}  {{ bold "Reason" | printf "%-10s" }}  {{ bold "Age" | printf "%-4s" }}  {{ bold "From" | printf "%-17s" }}  {{ bold "Message" }}
+  ----  ------  ----  ----               -------
+{{ range .Events }}  {{ .Type | printf "%-6s" }}  {{ .Reason | printf "%-10s" }}  {{ .Age | printf "%-4s" }}  {{ .From | printf "%-17s" }}  {{ .Message }}
+{{ end }}`,
+
+	"deployment_describe": `{{ bold "Name:" }}                   {{ .Name }}
+{{ bold "Namespace:" }}              {{ .Namespace }}
+{{ bold "CreationTimestamp:" }}      {{ .CreationTimestamp | timestamp }}
+{{ bold "Labels:" }}                 {{ range $k, $v := .Labels }}{{ $k }}={{ $v }}
+                        {{ end }}
+{{ bold "Annotations:" }}            {{ range $k, $v := .Annotations }}{{ $k }}: {{ $v }}
+                        {{ end }}
+{{ bold "Selector:" }}               {{ range $k, $v := .Spec.Selector.MatchLabels }}{{ $k }}={{ $v }}{{ end }}
+{{ bold "Replicas:" }}               {{ .Status.Replicas }} desired | {{ .Status.UpdatedReplicas }} updated | {{ .Status.Replicas }} total | {{ .Status.AvailableReplicas }} available | {{ sub .Status.Replicas .Status.AvailableReplicas }} unavailable
+{{ bold "StrategyType:" }}           {{ .Spec.Strategy.Type }}
+{{ bold "MinReadySeconds:" }}        0
+{{ bold "RollingUpdateStrategy:" }}  {{ .Spec.Strategy.RollingUpdate.MaxUnavailable }} max unavailable, {{ .Spec.Strategy.RollingUpdate.MaxSurge }} max surge
+{{ bold "Pod Template:" }}
+  {{ bold "Labels:" }}  {{ range $k, $v := .Labels }}{{ $k }}={{ $v }} {{ end }}
+  {{ bold "Containers:" }}
+{{ range .Spec.Containers }}   {{ bold .Name }}:
+    {{ bold "Image:" }}      {{ .Image }}
+    {{ bold "Port:" }}       {{ range .Ports }}{{ .ContainerPort }}/{{ .Protocol }}{{ end }}
+    {{ bold "Host Port:" }}  0/TCP
+{{ if .Resources.Limits }}    {{ bold "Limits:" }}
+{{ range $k, $v := .Resources.Limits }}      {{ $k }}:     {{ $v }}
+{{ end }}{{ end }}{{ if .Resources.Requests }}    {{ bold "Requests:" }}
+{{ range $k, $v := .Resources.Requests }}      {{ $k }}:     {{ $v }}
+{{ end }}{{ end }}    {{ bold "Environment:" }}  <none>
+    {{ bold "Mounts:" }}       <none>
+{{ end }}  {{ bold "Volumes:" }}        <none>
+
+{{ bold "Conditions:" }}
+  {{ bold "Type" | printf "%-11s" }}  {{ bold "Status" | printf "%-6s" }}  {{ bold "Reason" }}
+  ----           ------  ------
+  Available      True    MinimumReplicasAvailable
+  Progressing    True    NewReplicaSetAvailable
+
+{{ bold "Events:" }}
+  {{ bold "Type" | printf "%-6s" }}  {{ bold "Reason" | printf "%-10s" }}  {{ bold "Age" | printf "%-4s" }}  {{ bold "From" | printf "%-17s" }}  {{ bold "Message" }}
+  ----  ------  ----  ----               -------
+{{ range .Events }}  {{ .Type | printf "%-6s" }}  {{ .Reason | printf "%-10s" }}  {{ .Age | printf "%-4s" }}  {{ .From | printf "%-17s" }}  {{ .Message }}
+{{ end }}`,
+
+	"service_describe": `{{ bold "Name:" }}                     {{ .Name }}
+{{ bold "Namespace:" }}                {{ .Namespace }}
+{{ bold "Labels:" }}                   {{ range $k, $v := .Labels }}{{ $k }}={{ $v }}
+                          {{ end }}
+{{ bold "Annotations:" }}              {{ range $k, $v := .Annotations }}{{ $k }}: {{ $v }}
+                          {{ end }}
+{{ bold "Selector:" }}                 {{ range $k, $v := .Spec.Selector }}{{ $k }}={{ $v }}{{ end }}
+{{ bold "Type:" }}                     {{ .Spec.Type }}
+{{ bold "IP Family Policy:" }}         SingleStack
+{{ bold "IP Families:" }}              IPv4
+{{ bold "IP:" }}                       {{ .Spec.ClusterIP }}
+{{ bold "IPs:" }}                      {{ .Spec.ClusterIP }}
+{{ bold "Port:" }}                     {{ range .Spec.Ports }}{{ .Name }}  {{ .Port }}/{{ .Protocol }}{{ end }}
+{{ bold "TargetPort:" }}               {{ range .Spec.Ports }}{{ .TargetPort }}/{{ .Protocol }}{{ end }}
+{{ bold "Endpoints:" }}                10.244.1.5:80,10.244.1.6:80,10.244.1.7:80
+{{ bold "Session Affinity:" }}         None
+{{ bold "Internal Traffic Policy:" }}  Cluster
+
+{{ bold "Events:" }}
+  {{ bold "Type" | printf "%-6s" }}  {{ bold "Reason" | printf "%-10s" }}  {{ bold "Age" | printf "%-4s" }}  {{ bold "From" | printf "%-17s" }}  {{ bold "Message" }}
+  ----  ------  ----  ----               -------
+{{ range .Events }}  {{ .Type | printf "%-6s" }}  {{ .Reason | printf "%-10s" }}  {{ .Age | printf "%-4s" }}  {{ .From | printf "%-17s" }}  {{ .Message }}
+{{ end }}`,
+
+	"ingress_describe": `{{ bold "Name:" }}             {{ .Name }}
+{{ bold "Namespace:" }}        {{ .Namespace }}
+{{ bold "Address:" }}          {{ range .Status.LoadBalancer.Ingress }}{{ .IP }}{{ end }}
+{{ bold "Ingress Class:" }}    {{ .Spec.IngressClassName }}
+{{ bold "Default backend:" }}  <default>
+{{ bold "Rules:" }}
+  {{ bold "Host" | printf "%-22s" }}  {{ bold "Path" | printf "%-4s" }}  {{ bold "Backends" }}
+  ----                    ----  --------
+{{ range .Spec.Rules }}  {{ .Host | printf "%-22s" }}  {{ range .HTTP.Paths }}{{ .Path }}     {{ .Backend.Service.Name }}:{{ .Backend.Service.Port.Number }}{{ end }}
+{{ end }}
+
+{{ bold "Events:" }}
+  {{ bold "Type" | printf "%-6s" }}  {{ bold "Reason" | printf "%-10s" }}  {{ bold "Age" | printf "%-4s" }}  {{ bold "From" | printf "%-17s" }}  {{ bold "Message" }}
+  ----  ------  ----  ----               -------
+{{ range .Events }}  {{ .Type | printf "%-6s" }}  {{ .Reason | printf "%-10s" }}  {{ .Age | printf "%-4s" }}  {{ .From | printf "%-17s" }}  {{ .Message }}
+{{ end }}`,
+
+	"configmap_describe": `{{ bold "Name:" }}         {{ .Name }}
+{{ bold "Namespace:" }}    {{ .Namespace }}
+{{ bold "Labels:" }}       {{ range $k, $v := .Labels }}{{ $k }}={{ $v }}
+              {{ end }}
+{{ bold "Annotations:" }}  {{ range $k, $v := .Annotations }}{{ $k }}: {{ $v }}
+              {{ end }}
+
+{{ bold "Data" }}
+====
+{{ range $k, $v := .Data }}{{ bold $k }}:
+----
+{{ $v }}
+
+{{ end }}
+{{ bold "BinaryData" }}
+==========
+<none>
+
+{{ bold "Events:" }}
+  {{ bold "Type" | printf "%-6s" }}  {{ bold "Reason" | printf "%-10s" }}  {{ bold "Age" | printf "%-4s" }}  {{ bold "From" | printf "%-17s" }}  {{ bold "Message" }}
+  ----  ------  ----  ----               -------
+{{ range .Events }}  {{ .Type | printf "%-6s" }}  {{ .Reason | printf "%-10s" }}  {{ .Age | printf "%-4s" }}  {{ .From | printf "%-17s" }}  {{ .Message }}
+{{ end }}`,
+
+	"secret_describe": `{{ bold "Name:" }}         {{ .Name }}
+{{ bold "Namespace:" }}    {{ .Namespace }}
+{{ bold "Labels:" }}       {{ range $k, $v := .Labels }}{{ $k }}={{ $v }}
+              {{ end }}
+{{ bold "Annotations:" }}  {{ range $k, $v := .Annotations }}{{ $k }}: {{ $v }}
+              {{ end }}
+
+{{ bold "Type:" }}  {{ .Type }}
+
+{{ bold "Data" }}
+====
+{{ range $k, $v := .Data }}{{ $k }}:  {{ len $v }} bytes
+{{ end }}
+
+{{ bold "Events:" }}
+  {{ bold "Type" | printf "%-6s" }}  {{ bold "Reason" | printf "%-10s" }}  {{ bold "Age" | printf "%-4s" }}  {{ bold "From" | printf "%-17s" }}  {{ bold "Message" }}
+  ----  ------  ----  ----               -------
+{{ range .Events }}  {{ .Type | printf "%-6s" }}  {{ .Reason | printf "%-10s" }}  {{ .Age | printf "%-4s" }}  {{ .From | printf "%-17s" }}  {{ .Message }}
+{{ end }}`,
 }
 
 // GetDefaultTemplate returns a default template by name

@@ -99,6 +99,44 @@ func (t *StatefulSetTransformer) GetSortValue(resource interface{}, column strin
 	}
 }
 
+// GetUniqKey generates a unique key for resource grouping
+func (t *StatefulSetTransformer) GetUniqKey(resource interface{}, templateEngine *template.Engine) (string, error) {
+	statefulSet, ok := resource.(*appsv1.StatefulSet)
+	if !ok {
+		return "", fmt.Errorf("expected *appsv1.StatefulSet, got %T", resource)
+	}
+
+	// Extract image list for the unique key
+	var images []string
+	for _, container := range statefulSet.Spec.Template.Spec.Containers {
+		images = append(images, container.Image)
+	}
+
+	data := map[string]interface{}{
+		"Metadata": map[string]interface{}{
+			"Name": statefulSet.Name,
+		},
+		"ImageList": images,
+	}
+
+	return templateEngine.Execute("{{ .Metadata.Name }}_{{ join .ImageList \";\" }}", data)
+}
+
+// CanGroup returns true if this resource type supports grouping
+func (t *StatefulSetTransformer) CanGroup() bool {
+	return true
+}
+
+// AggregateResources combines multiple statefulsets with the same unique key
+func (t *StatefulSetTransformer) AggregateResources(resources []interface{}, showNamespace bool, multiContext bool, templateEngine *template.Engine) ([]string, *selection.ResourceIdentity, error) {
+	if len(resources) == 0 {
+		return nil, nil, fmt.Errorf("no resources to aggregate")
+	}
+
+	// For now, just return the first resource (basic implementation)
+	return t.TransformToRow(resources[0], showNamespace, templateEngine)
+}
+
 // formatBasicRow provides fallback formatting when templates fail
 func (t *StatefulSetTransformer) formatBasicRow(statefulSet *appsv1.StatefulSet, showNamespace bool) []string {
 	age := getAge(statefulSet.CreationTimestamp.Time)

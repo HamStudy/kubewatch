@@ -43,6 +43,10 @@ type ResourceView struct {
 	isMultiContext    bool
 	showContextColumn bool
 
+	// Resource grouping
+	enableGrouping   bool
+	groupedResources map[string][]interface{} // uniq_key -> resources
+
 	// New refactored components
 	tableComponent      *table.Model
 	selectionTracker    *selection.Tracker
@@ -77,6 +81,8 @@ func NewResourceView(state *core.State, k8sClient *k8s.Client) *ResourceView {
 		isMultiContext:    false,
 		showContextColumn: false,
 		resourceMap:       make(map[int]*selection.ResourceIdentity),
+		enableGrouping:    true, // Enable grouping by default
+		groupedResources:  make(map[string][]interface{}),
 	}
 
 	// Initialize new refactored components
@@ -1139,7 +1145,12 @@ func (v *ResourceView) renderHeader() string {
 	} else if v.state.CurrentContext != "" {
 		contextInfo = fmt.Sprintf("Context: %s", v.state.CurrentContext)
 	} else {
-		contextInfo = "Context: default"
+		// Get the actual current context from kubeconfig instead of defaulting to "default"
+		if _, currentCtx, err := k8s.GetAvailableContexts(); err == nil && currentCtx != "" {
+			contextInfo = fmt.Sprintf("Context: %s", currentCtx)
+		} else {
+			contextInfo = "Context: <none>"
+		}
 	}
 
 	// Add word wrap indicator
@@ -1198,9 +1209,14 @@ func (v *ResourceView) updateColumnsForResourceType() {
 	// Check if we're viewing all namespaces or a specific one
 	showNamespace := v.state.CurrentNamespace == "" || v.state.CurrentNamespace == "all"
 
-	// Start with context column if in multi-context mode
+	// Determine if we should show context column
+	// Only show context column if we're in multi-context mode AND have multiple contexts
+	shouldShowContext := v.isMultiContext && len(v.state.CurrentContexts) > 1
+	v.showContextColumn = shouldShowContext
+
+	// Start with context column if needed
 	var baseHeaders []string
-	if v.isMultiContext && v.showContextColumn {
+	if shouldShowContext {
 		baseHeaders = []string{"CONTEXT", "NAME"}
 	} else {
 		baseHeaders = []string{"NAME"}
@@ -2017,6 +2033,48 @@ func (v *ResourceView) parseAgeToSeconds(age string) float64 {
 	}
 }
 
+// groupResources groups resources by their unique key using the transformer
+func (v *ResourceView) groupResources(resources []interface{}, resourceType string) (map[string][]interface{}, error) {
+	if !v.enableGrouping {
+		// If grouping is disabled, create individual groups
+		groups := make(map[string][]interface{})
+		for i, resource := range resources {
+			key := fmt.Sprintf("item_%d", i)
+			groups[key] = []interface{}{resource}
+		}
+		return groups, nil
+	}
+
+	transformer, exists := v.transformerRegistry.Get(resourceType)
+	if !exists {
+		return nil, fmt.Errorf("no transformer found for resource type: %s", resourceType)
+	}
+
+	// Only group if the transformer supports it
+	if !transformer.CanGroup() {
+		// Create individual groups
+		groups := make(map[string][]interface{})
+		for i, resource := range resources {
+			key := fmt.Sprintf("item_%d", i)
+			groups[key] = []interface{}{resource}
+		}
+		return groups, nil
+	}
+
+	groups := make(map[string][]interface{})
+	for _, resource := range resources {
+		uniqKey, err := transformer.GetUniqKey(resource, v.templateEngine)
+		if err != nil {
+			// If we can't get a unique key, use a fallback
+			uniqKey = fmt.Sprintf("fallback_%p", resource)
+		}
+
+		groups[uniqKey] = append(groups[uniqKey], resource)
+	}
+
+	return groups, nil
+}
+
 // Multi-context table update methods
 
 func (v *ResourceView) updateTableWithPodsMultiContext(podsWithContext []k8s.PodWithContext) {
@@ -2173,6 +2231,94 @@ func (v *ResourceView) updateTableWithDeploymentsMultiContext(deploymentsWithCon
 	// Update columns for deployments with context column
 	v.updateColumnsForResourceType()
 
+	showNamespace := v.state.CurrentNamespace == "" || v.state.CurrentNamespace == "all"
+
+	// Save the currently selected resource identity
+	v.saveSelectedIdentity()
+
+	// Clear and rebuild rows and resource map
+	v.rows = [][]string{}
+	v.resourceMap = make(map[int]*selection.ResourceIdentity)
+
+	// Convert to interface slice for grouping
+	var resources []interface{}
+	for _, dwc := range deploymentsWithContext {
+		// Wrap deployment with context information
+		resourceWithContext := map[string]interface{}{
+			"resource": dwc.Deployment,
+			"context":  dwc.Context,
+		}
+		resources = append(resources, resourceWithContext)
+	}
+
+	// Group resources by unique key
+	groups, err := v.groupResources(resources, "Deployment")
+	if err != nil {
+		// Fallback to individual processing if grouping fails
+		v.updateTableWithDeploymentsMultiContextFallback(deploymentsWithContext)
+		return
+	}
+
+	// Get transformer for deployments
+	transformer, exists := v.transformerRegistry.Get("Deployment")
+	if !exists {
+		// Fallback if no transformer
+		v.updateTableWithDeploymentsMultiContextFallback(deploymentsWithContext)
+		return
+	}
+
+	// Process each group
+	for _, group := range groups {
+		if len(group) == 1 {
+			// Single resource - use normal transformation
+			resourceWithContext := group[0].(map[string]interface{})
+			deployment := resourceWithContext["resource"].(appsv1.Deployment)
+			context := resourceWithContext["context"].(string)
+
+			row, identity, err := transformer.TransformToRow(deployment, showNamespace, v.templateEngine)
+			if err != nil {
+				continue
+			}
+
+			// Add context column if needed
+			if v.showContextColumn {
+				row = append([]string{context}, row...)
+				identity.Context = context
+			}
+
+			v.rows = append(v.rows, row)
+			v.resourceMap[len(v.rows)-1] = identity
+		} else {
+			// Multiple resources - use aggregation
+			row, identity, err := transformer.AggregateResources(group, showNamespace, v.showContextColumn, v.templateEngine)
+			if err != nil {
+				continue
+			}
+
+			v.rows = append(v.rows, row)
+			v.resourceMap[len(v.rows)-1] = identity
+		}
+	}
+
+	// Sort the rows BEFORE restoring selection
+	v.sortRows()
+
+	// Restore selection intelligently
+	v.restoreSelectionByIdentity()
+
+	// Adjust viewport to keep selection visible
+	if v.selectedRow >= v.viewportStart+v.viewportHeight {
+		v.viewportStart = v.selectedRow - v.viewportHeight + 1
+	} else if v.selectedRow < v.viewportStart {
+		v.viewportStart = v.selectedRow
+	}
+
+	// Calculate column widths
+	v.calculateColumnWidths()
+}
+
+// Fallback method for when grouping fails
+func (v *ResourceView) updateTableWithDeploymentsMultiContextFallback(deploymentsWithContext []k8s.DeploymentWithContext) {
 	showNamespace := v.state.CurrentNamespace == "" || v.state.CurrentNamespace == "all"
 
 	// Preserve the currently selected resource name

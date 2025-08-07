@@ -84,6 +84,13 @@ func (e *Engine) registerBuiltinFuncs() {
 	e.funcMap["min"] = e.minFunc
 	e.funcMap["max"] = e.maxFunc
 
+	// String operations
+	e.funcMap["join"] = e.joinFunc
+	e.funcMap["split"] = strings.Split
+	e.funcMap["trim"] = strings.TrimSpace
+	e.funcMap["upper"] = strings.ToUpper
+	e.funcMap["lower"] = strings.ToLower
+
 	// Time functions
 	e.funcMap["ago"] = e.agoFunc
 	e.funcMap["ageInSeconds"] = e.ageInSecondsFunc
@@ -498,6 +505,22 @@ func (e *Engine) timestampFunc(t interface{}) string {
 		return "unknown"
 	}
 	return ts.Format("2006-01-02 15:04:05")
+}
+
+// String functions
+func (e *Engine) joinFunc(slice interface{}, separator string) string {
+	switch v := slice.(type) {
+	case []string:
+		return strings.Join(v, separator)
+	case []interface{}:
+		var strs []string
+		for _, item := range v {
+			strs = append(strs, fmt.Sprintf("%v", item))
+		}
+		return strings.Join(strs, separator)
+	default:
+		return fmt.Sprintf("%v", slice)
+	}
 }
 
 // Helper function to convert interface to float64

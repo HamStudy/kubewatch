@@ -138,3 +138,32 @@ func getIngressPorts(ingress *networkingv1.Ingress) string {
 	}
 	return "80"
 }
+
+// GetUniqKey generates a unique key for resource grouping
+func (t *IngressTransformer) GetUniqKey(resource interface{}, templateEngine *template.Engine) (string, error) {
+	ingress, ok := resource.(*networkingv1.Ingress)
+	if !ok {
+		return "", fmt.Errorf("expected *networkingv1.Ingress, got %T", resource)
+	}
+
+	data := map[string]interface{}{
+		"Metadata": map[string]interface{}{
+			"Name": ingress.Name,
+		},
+	}
+
+	return templateEngine.Execute("{{ .Metadata.Name }}", data)
+}
+
+// CanGroup returns true if this resource type supports grouping
+func (t *IngressTransformer) CanGroup() bool {
+	return false
+}
+
+// AggregateResources combines multiple resources with the same unique key
+func (t *IngressTransformer) AggregateResources(resources []interface{}, showNamespace bool, multiContext bool, templateEngine *template.Engine) ([]string, *selection.ResourceIdentity, error) {
+	if len(resources) == 0 {
+		return nil, nil, fmt.Errorf("no resources to aggregate")
+	}
+	return t.TransformToRow(resources[0], showNamespace, templateEngine)
+}

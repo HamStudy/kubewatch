@@ -323,6 +323,39 @@ func (t *PodTransformer) GetSortValue(resource interface{}, column string) inter
 	}
 }
 
+// GetUniqKey generates a unique key for resource grouping
+func (t *PodTransformer) GetUniqKey(resource interface{}, templateEngine *template.Engine) (string, error) {
+	pod, ok := resource.(v1.Pod)
+	if !ok {
+		return "", fmt.Errorf("expected Pod, got %T", resource)
+	}
+
+	// For pods, the unique key is just the name (pods don't typically get grouped)
+	data := map[string]interface{}{
+		"Metadata": map[string]interface{}{
+			"Name": pod.Name,
+		},
+	}
+
+	return templateEngine.Execute("{{ .Metadata.Name }}", data)
+}
+
+// CanGroup returns true if this resource type supports grouping
+func (t *PodTransformer) CanGroup() bool {
+	return false // Pods typically don't get grouped
+}
+
+// AggregateResources combines multiple pods with the same unique key
+func (t *PodTransformer) AggregateResources(resources []interface{}, showNamespace bool, multiContext bool, templateEngine *template.Engine) ([]string, *selection.ResourceIdentity, error) {
+	// Since pods don't typically get grouped, just return the first one
+	if len(resources) == 0 {
+		return nil, nil, fmt.Errorf("no resources to aggregate")
+	}
+
+	// Use the first resource
+	return t.TransformToRow(resources[0], showNamespace, templateEngine)
+}
+
 // getAge returns a human-readable age string
 func getAge(t time.Time) string {
 	duration := time.Since(t)

@@ -18,6 +18,15 @@ type ResourceTransformer interface {
 
 	// GetResourceType returns the resource type this transformer handles
 	GetResourceType() string
+
+	// GetUniqKey generates a unique key for resource grouping
+	GetUniqKey(resource interface{}, templateEngine *template.Engine) (string, error)
+
+	// CanGroup returns true if this resource type supports grouping
+	CanGroup() bool
+
+	// AggregateResources combines multiple resources with the same unique key
+	AggregateResources(resources []interface{}, showNamespace bool, multiContext bool, templateEngine *template.Engine) ([]string, *selection.ResourceIdentity, error)
 }
 
 // Registry manages resource transformers

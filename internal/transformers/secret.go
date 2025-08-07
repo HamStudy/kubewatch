@@ -93,3 +93,32 @@ func (t *SecretTransformer) GetSortValue(resource interface{}, column string) in
 		return secret.Name
 	}
 }
+
+// GetUniqKey generates a unique key for resource grouping
+func (t *SecretTransformer) GetUniqKey(resource interface{}, templateEngine *template.Engine) (string, error) {
+	secret, ok := resource.(*corev1.Secret)
+	if !ok {
+		return "", fmt.Errorf("expected *corev1.Secret, got %T", resource)
+	}
+
+	data := map[string]interface{}{
+		"Metadata": map[string]interface{}{
+			"Name": secret.Name,
+		},
+	}
+
+	return templateEngine.Execute("{{ .Metadata.Name }}", data)
+}
+
+// CanGroup returns true if this resource type supports grouping
+func (t *SecretTransformer) CanGroup() bool {
+	return false
+}
+
+// AggregateResources combines multiple resources with the same unique key
+func (t *SecretTransformer) AggregateResources(resources []interface{}, showNamespace bool, multiContext bool, templateEngine *template.Engine) ([]string, *selection.ResourceIdentity, error) {
+	if len(resources) == 0 {
+		return nil, nil, fmt.Errorf("no resources to aggregate")
+	}
+	return t.TransformToRow(resources[0], showNamespace, templateEngine)
+}

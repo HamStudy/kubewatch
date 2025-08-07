@@ -89,3 +89,32 @@ func (t *ConfigMapTransformer) GetSortValue(resource interface{}, column string)
 		return configMap.Name
 	}
 }
+
+// GetUniqKey generates a unique key for resource grouping
+func (t *ConfigMapTransformer) GetUniqKey(resource interface{}, templateEngine *template.Engine) (string, error) {
+	configMap, ok := resource.(*corev1.ConfigMap)
+	if !ok {
+		return "", fmt.Errorf("expected *corev1.ConfigMap, got %T", resource)
+	}
+
+	data := map[string]interface{}{
+		"Metadata": map[string]interface{}{
+			"Name": configMap.Name,
+		},
+	}
+
+	return templateEngine.Execute("{{ .Metadata.Name }}", data)
+}
+
+// CanGroup returns true if this resource type supports grouping
+func (t *ConfigMapTransformer) CanGroup() bool {
+	return false
+}
+
+// AggregateResources combines multiple resources with the same unique key
+func (t *ConfigMapTransformer) AggregateResources(resources []interface{}, showNamespace bool, multiContext bool, templateEngine *template.Engine) ([]string, *selection.ResourceIdentity, error) {
+	if len(resources) == 0 {
+		return nil, nil, fmt.Errorf("no resources to aggregate")
+	}
+	return t.TransformToRow(resources[0], showNamespace, templateEngine)
+}

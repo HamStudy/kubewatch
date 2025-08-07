@@ -156,6 +156,35 @@ func getExternalIP(service *corev1.Service) string {
 	return "<none>"
 }
 
+// GetUniqKey generates a unique key for resource grouping
+func (t *ServiceTransformer) GetUniqKey(resource interface{}, templateEngine *template.Engine) (string, error) {
+	service, ok := resource.(*corev1.Service)
+	if !ok {
+		return "", fmt.Errorf("expected *corev1.Service, got %T", resource)
+	}
+
+	data := map[string]interface{}{
+		"Metadata": map[string]interface{}{
+			"Name": service.Name,
+		},
+	}
+
+	return templateEngine.Execute("{{ .Metadata.Name }}", data)
+}
+
+// CanGroup returns true if this resource type supports grouping
+func (t *ServiceTransformer) CanGroup() bool {
+	return false
+}
+
+// AggregateResources combines multiple resources with the same unique key
+func (t *ServiceTransformer) AggregateResources(resources []interface{}, showNamespace bool, multiContext bool, templateEngine *template.Engine) ([]string, *selection.ResourceIdentity, error) {
+	if len(resources) == 0 {
+		return nil, nil, fmt.Errorf("no resources to aggregate")
+	}
+	return t.TransformToRow(resources[0], showNamespace, templateEngine)
+}
+
 // formatPorts formats the service ports
 func formatPorts(ports []corev1.ServicePort) string {
 	if len(ports) == 0 {
