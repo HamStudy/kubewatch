@@ -15,6 +15,8 @@ type NamespaceView struct {
 	filteredItems    []v1.Namespace
 	selectedIndex    int
 	filter           string
+	filterMode       bool   // true when actively editing the filter
+	originalFilter   string // stores the filter before editing (for ESC)
 	width            int
 	height           int
 	currentNamespace string
@@ -102,6 +104,41 @@ func (v *NamespaceView) Init() tea.Cmd {
 func (v *NamespaceView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
+		// Handle filter mode
+		if v.filterMode {
+			switch msg.String() {
+			case "enter":
+				// Exit filter mode and apply filter
+				v.filterMode = false
+				return v, nil
+			case "esc":
+				// Exit filter mode and revert to original filter
+				v.filter = v.originalFilter
+				v.filterMode = false
+				v.applyFilter()
+				return v, nil
+			case "backspace":
+				if len(v.filter) > 0 {
+					v.filter = v.filter[:len(v.filter)-1]
+					v.applyFilter()
+				}
+				return v, nil
+			case "delete":
+				// Clear the entire filter
+				v.filter = ""
+				v.applyFilter()
+				return v, nil
+			default:
+				// Add printable characters to filter
+				if len(msg.String()) == 1 && msg.String()[0] >= 32 && msg.String()[0] < 127 {
+					v.filter += msg.String()
+					v.applyFilter()
+				}
+				return v, nil
+			}
+		}
+
+		// Handle navigation mode
 		switch msg.String() {
 		case "up", "k":
 			if v.selectedIndex > 0 {
@@ -126,15 +163,11 @@ func (v *NamespaceView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				v.selectedIndex = len(v.filteredItems) - 1
 			}
 		case "/":
-			// Start filtering
-			v.filter = ""
-		case "backspace":
-			if len(v.filter) > 0 {
-				v.filter = v.filter[:len(v.filter)-1]
-				v.applyFilter()
-			}
+			// Enter filter mode
+			v.originalFilter = v.filter
+			v.filterMode = true
 		case "esc":
-			// Clear filter
+			// Clear filter when not in filter mode
 			v.filter = ""
 			v.applyFilter()
 		case "enter":
@@ -144,19 +177,8 @@ func (v *NamespaceView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Cancel - will be handled by parent
 			return v, nil
 		case "n":
-			// Only treat 'n' as cancel when not filtering
-			if v.filter == "" {
-				return v, nil
-			}
-			// Otherwise, add it to the filter
-			v.filter += msg.String()
-			v.applyFilter()
-		default:
-			// Add to filter if it's a printable character
-			if len(msg.String()) == 1 && msg.String()[0] >= 32 && msg.String()[0] < 127 {
-				v.filter += msg.String()
-				v.applyFilter()
-			}
+			// Cancel - will be handled by parent
+			return v, nil
 		}
 	}
 	return v, nil
@@ -227,9 +249,13 @@ func (v *NamespaceView) View() string {
 		)
 	}
 
-	// Show filter if active
-	if v.filter != "" {
-		content.WriteString(filterStyle.Render(fmt.Sprintf("Filter: %s", v.filter)))
+	// Show filter if active or in filter mode
+	if v.filter != "" || v.filterMode {
+		filterText := fmt.Sprintf("Filter: %s", v.filter)
+		if v.filterMode {
+			filterText += "█" // Add cursor indicator when in filter mode
+		}
+		content.WriteString(filterStyle.Render(filterText))
 		content.WriteString("\n\n")
 	}
 
@@ -282,7 +308,12 @@ func (v *NamespaceView) View() string {
 	}
 
 	// Add help text
-	helpText := "\n\n[↑↓/jk] Navigate  [/] Filter  [Enter] Select  [Esc/q/n] Cancel"
+	var helpText string
+	if v.filterMode {
+		helpText = "\n\n[Type] Edit filter  [Enter] Apply  [Esc] Cancel  [Del] Clear"
+	} else {
+		helpText = "\n\n[↑↓/jk] Navigate  [/] Filter  [Enter] Select  [Esc/q/n] Cancel"
+	}
 	content.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Render(helpText))
 
 	// Center the popup

@@ -503,11 +503,16 @@ func TestNamespaceViewEdgeCases(t *testing.T) {
 		validate func(*testing.T, *NamespaceView)
 	}{
 		{
-			name: "handles printable characters in filter",
+			name: "handles printable characters in filter mode",
 			setup: func() *NamespaceView {
 				return NewNamespaceView([]v1.Namespace{createNamespace("test")}, "")
 			},
 			action: func(v *NamespaceView) {
+				// Enter filter mode first
+				msg := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/")}
+				model, _ := v.Update(msg)
+				*v = *model.(*NamespaceView)
+
 				// Add various printable characters
 				chars := "abc123-_."
 				for _, ch := range chars {
@@ -519,6 +524,26 @@ func TestNamespaceViewEdgeCases(t *testing.T) {
 			validate: func(t *testing.T, v *NamespaceView) {
 				if v.filter != "abc123-_." {
 					t.Errorf("filter = %q, want %q", v.filter, "abc123-_.")
+				}
+			},
+		},
+		{
+			name: "ignores printable characters in navigation mode",
+			setup: func() *NamespaceView {
+				return NewNamespaceView([]v1.Namespace{createNamespace("test")}, "")
+			},
+			action: func(v *NamespaceView) {
+				// Try to add printable characters without entering filter mode
+				chars := "abc"
+				for _, ch := range chars {
+					msg := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{ch}}
+					model, _ := v.Update(msg)
+					*v = *model.(*NamespaceView)
+				}
+			},
+			validate: func(t *testing.T, v *NamespaceView) {
+				if v.filter != "" {
+					t.Errorf("should ignore printable characters in navigation mode, got filter: %q", v.filter)
 				}
 			},
 		},
