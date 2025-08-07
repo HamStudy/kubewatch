@@ -117,46 +117,127 @@ func TestNewClientFromConfig(t *testing.T) {
 }
 
 func TestNewClient(t *testing.T) {
+	// Save original HOME to restore later
+	originalHome := os.Getenv("HOME")
+	defer os.Setenv("HOME", originalHome)
+
+	// Create a valid kubeconfig for testing
+	validKubeconfig := `apiVersion: v1
+kind: Config
+clusters:
+- cluster:
+    server: https://127.0.0.1:6443
+  name: test-cluster
+contexts:
+- context:
+    cluster: test-cluster
+    user: test-user
+  name: test-context
+current-context: test-context
+users:
+- name: test-user
+  user:
+    token: test-token
+`
+
 	tests := []struct {
 		name        string
 		kubeconfig  string
-		setupEnv    func()
+		setupEnv    func() string // Returns the kubeconfig path to use
 		cleanupEnv  func()
 		expectError bool
 	}{
 		{
 			name:       "Empty kubeconfig uses default location",
 			kubeconfig: "",
-			setupEnv: func() {
-				// Create a temporary kubeconfig file
-				home, _ := os.UserHomeDir()
-				kubeconfigPath := filepath.Join(home, ".kube", "config")
+			setupEnv: func() string {
+				// Create a temporary kubeconfig file in a test directory
+				// NEVER modify the user's actual .kube/config!
+				tempDir, _ := os.MkdirTemp("", "kubewatch-test-*")
+				os.Setenv("HOME", tempDir)
+				kubeconfigPath := filepath.Join(tempDir, ".kube", "config")
 				os.MkdirAll(filepath.Dir(kubeconfigPath), 0755)
 				os.WriteFile(kubeconfigPath, []byte(validKubeconfig), 0644)
+				return "" // Empty string will use default location
 			},
 			cleanupEnv: func() {
-				home, _ := os.UserHomeDir()
-				kubeconfigPath := filepath.Join(home, ".kube", "config")
-				os.Remove(kubeconfigPath)
+				// Clean up the temporary test directory
+				if tempHome := os.Getenv("HOME"); strings.Contains(tempHome, "kubewatch-test-") {
+					os.RemoveAll(tempHome)
+				}
 			},
 			expectError: false,
 		},
 		{
 			name:       "Multiple kubeconfig paths",
-			kubeconfig: "/tmp/config1:/tmp/config2",
-			setupEnv: func() {
-				os.WriteFile("/tmp/config1", []byte(validKubeconfig), 0644)
+			kubeconfig: "", // Will be set by setupEnv
+			setupEnv: func() string {
+				// Create proper temporary files
+				tmpFile1, _ := os.CreateTemp("", "kubeconfig-test-1-*.yaml")
+				tmpFile1.Write([]byte(validKubeconfig))
+				tmpFile1.Close()
+
+				tmpFile2, _ := os.CreateTemp("", "kubeconfig-test-2-*.yaml")
+				tmpFile2.Write([]byte(validKubeconfig))
+				tmpFile2.Close()
+
+				// Store paths for cleanup
+				os.Setenv("TEST_KUBECONFIG_1", tmpFile1.Name())
+				os.Setenv("TEST_KUBECONFIG_2", tmpFile2.Name())
+
+				// Return the paths separated by colon
+				return tmpFile1.Name() + ":" + tmpFile2.Name()
 			},
 			cleanupEnv: func() {
-				os.Remove("/tmp/config1")
-				os.Remove("/tmp/config2")
+				// Clean up temporary files
+				if path1 := os.Getenv("TEST_KUBECONFIG_1"); path1 != "" {
+					os.Remove(path1)
+					os.Unsetenv("TEST_KUBECONFIG_1")
+				}
+				if path2 := os.Getenv("TEST_KUBECONFIG_2"); path2 != "" {
+					os.Remove(path2)
+					os.Unsetenv("TEST_KUBECONFIG_2")
+				}
+			},
+			expectError: false,
+		},
+		{
+			name:       "Multiple kubeconfig paths",
+			kubeconfig: "", // Will be set in setupEnv
+			setupEnv: func() string {
+				// Create proper temporary files
+				tmpFile1, _ := os.CreateTemp("", "kubeconfig-test-1-*.yaml")
+				tmpFile1.Write([]byte(validKubeconfig))
+				tmpFile1.Close()
+
+				tmpFile2, _ := os.CreateTemp("", "kubeconfig-test-2-*.yaml")
+				tmpFile2.Write([]byte(validKubeconfig))
+				tmpFile2.Close()
+
+				// Store paths for cleanup
+				os.Setenv("TEST_KUBECONFIG_1", tmpFile1.Name())
+				os.Setenv("TEST_KUBECONFIG_2", tmpFile2.Name())
+
+				// Return the paths separated by colon
+				return tmpFile1.Name() + ":" + tmpFile2.Name()
+			},
+			cleanupEnv: func() {
+				// Clean up temporary files
+				if path1 := os.Getenv("TEST_KUBECONFIG_1"); path1 != "" {
+					os.Remove(path1)
+					os.Unsetenv("TEST_KUBECONFIG_1")
+				}
+				if path2 := os.Getenv("TEST_KUBECONFIG_2"); path2 != "" {
+					os.Remove(path2)
+					os.Unsetenv("TEST_KUBECONFIG_2")
+				}
 			},
 			expectError: false,
 		},
 		{
 			name:        "Windows-style multiple paths",
 			kubeconfig:  "C:\\config1;C:\\config2",
-			setupEnv:    func() {},
+			setupEnv:    func() string { return "" },
 			cleanupEnv:  func() {},
 			expectError: runtime.GOOS != "windows",
 		},
@@ -164,14 +245,18 @@ func TestNewClient(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			kubeconfigPath := tt.kubeconfig
 			if tt.setupEnv != nil {
-				tt.setupEnv()
+				path := tt.setupEnv()
+				if path != "" {
+					kubeconfigPath = path
+				}
 			}
 			if tt.cleanupEnv != nil {
 				defer tt.cleanupEnv()
 			}
 
-			client, err := NewClient(tt.kubeconfig)
+			client, err := NewClient(kubeconfigPath)
 
 			if tt.expectError {
 				if err == nil {

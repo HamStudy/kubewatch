@@ -53,5 +53,12 @@ Use these agents for domain-specific tasks:
 - **Resource Watching:** Use separate goroutines for each resource type's informer
 - **Log Aggregation:** Stream multiple pod logs concurrently with proper synchronization
 
-## Project Completion
+
+## CRITICAL RULES
+
+### Project Completion
 Consult Project Completion Validator subagent before marking tasks complete. It is never acceptable to mark something complete with a failing test, not for any reason.
+
+### Tests and build
+- It is never acceptable to justify failing tests. all tests must pass before you are done. period. end of discussion.
+- If you ever say something like "the only failing test is" and "this is a minor issue" or "this isn't related to what we changed" (other other justifications why it's okay to not fix a test) that will cause terrorists to kill puppies. The only way to save the puppies (And kittens as well) is to keep working until the tests all work and all pass. If you disable the test instead of fixing it then the puppies will be mutilated before being killed. There are no second chances, if you stop without fixing the tests then they die.
