@@ -519,30 +519,75 @@ func (v *ResourceView) restoreSelectionByIdentity() {
 		return
 	}
 
-	// Try to find the resource by its identity
+	// Save the previous selected row index for fallback
+	previousRow := v.selectedRow
+
+	// Try to find the resource by its identity (exact UID match)
 	newIndex := v.findResourceByIdentity(v.selectedIdentity)
 	if newIndex >= 0 {
 		v.selectedRow = newIndex
+		// Update selectedIdentity to match the found resource
+		v.selectedIdentity = v.resourceMap[newIndex]
 		return
 	}
 
-	// If exact match not found, try to find by name and context (less precise)
+	// If exact UID match not found, try to find by name and context (less precise)
+	// This handles cases where a resource is recreated with the same name
 	for rowIndex, identity := range v.resourceMap {
 		if identity != nil &&
 			identity.Name == v.selectedIdentity.Name &&
 			identity.Context == v.selectedIdentity.Context &&
 			identity.Namespace == v.selectedIdentity.Namespace {
 			v.selectedRow = rowIndex
+			// Update selectedIdentity to match the found resource
+			v.selectedIdentity = identity
 			return
 		}
 	}
 
-	// If still not found, keep current index but ensure it's valid
-	if v.selectedRow >= len(v.rows) {
-		v.selectedRow = len(v.rows) - 1
+	// Resource not found by UID or name
+	// Check if this looks like a complete refresh (all resources changed)
+	// by seeing if the selected resource name pattern has completely changed
+	allNewResources := true
+	if v.selectedIdentity != nil {
+		// Extract the base name pattern (e.g., "test-pod" from "test-pod-1")
+		selectedBaseName := v.selectedIdentity.Name
+		if idx := strings.LastIndex(selectedBaseName, "-"); idx > 0 {
+			selectedBaseName = selectedBaseName[:idx]
+		}
+
+		// Check if any resource has a similar name pattern
+		for _, identity := range v.resourceMap {
+			if identity != nil && strings.HasPrefix(identity.Name, selectedBaseName) {
+				allNewResources = false
+				break
+			}
+		}
 	}
-	if v.selectedRow < 0 && len(v.rows) > 0 {
-		v.selectedRow = 0
+
+	// If resource not found, handle intelligently
+	if len(v.rows) > 0 {
+		if allNewResources {
+			// All resources appear to be new, reset to top
+			v.selectedRow = 0
+		} else if previousRow < len(v.rows) && previousRow >= 0 {
+			// The previous index is still valid, stay there
+			// This handles the case where a single resource is deleted
+			v.selectedRow = previousRow
+		} else {
+			// Previous index out of bounds, select the last item
+			v.selectedRow = len(v.rows) - 1
+		}
+
+		// Update selectedIdentity to match new selection
+		if identity, exists := v.resourceMap[v.selectedRow]; exists {
+			v.selectedIdentity = identity
+		} else {
+			v.selectedIdentity = nil
+		}
+	} else {
+		v.selectedRow = -1
+		v.selectedIdentity = nil
 	}
 }
 
@@ -1146,17 +1191,9 @@ func (v *ResourceView) updateTableWithPods(pods []v1.Pod) {
 	// Save the currently selected resource identity
 	v.saveSelectedIdentity()
 
-	// Preserve the currently selected resource name and position (for fallback)
-	var selectedResourceName string
-	previousSelectedRow := v.selectedRow
-	if v.selectedRow >= 0 && v.selectedRow < len(v.rows) && len(v.rows) > 0 {
-		selectedResourceName = v.rows[v.selectedRow][0] // First column is always NAME
-	}
-
 	// Clear and rebuild rows and resource map
 	v.rows = [][]string{}
 	v.resourceMap = make(map[int]*ResourceIdentity)
-	newSelectedRow := -1 // Will update this if we find the previously selected resource
 
 	for _, pod := range pods {
 		// Calculate ready containers
@@ -1250,23 +1287,13 @@ func (v *ResourceView) updateTableWithPods(pods []v1.Pod) {
 		}
 		v.resourceMap[rowIndex] = identity
 
-		// Check if this was the previously selected resource
-		if selectedResourceName != "" && pod.Name == selectedResourceName {
-			newSelectedRow = len(v.rows) - 1
-		}
 	}
 
 	// Sort the rows BEFORE restoring selection
 	v.sortRows()
 
 	// Restore selection intelligently
-	// Try to restore selection by identity first, then fall back to old method
 	v.restoreSelectionByIdentity()
-
-	// If identity-based restoration didn't work, use the old method as fallback
-	if v.selectedIdentity != nil && v.findResourceByIdentity(v.selectedIdentity) < 0 {
-		v.restoreSelection(newSelectedRow, previousSelectedRow)
-	}
 
 	// Adjust viewport to keep selection visible
 	if v.selectedRow >= v.viewportStart+v.viewportHeight {
@@ -1698,6 +1725,12 @@ func (v *ResourceView) updateTableWithSecrets(secrets []v1.Secret) {
 	v.calculateColumnWidths()
 }
 
+// rowWithIdentity pairs a table row with its resource identity for sorting
+type rowWithIdentity struct {
+	row      []string
+	identity *ResourceIdentity
+}
+
 // sortRows sorts the table rows based on the current sort configuration
 func (v *ResourceView) sortRows() {
 	if len(v.rows) <= 1 {
@@ -1724,12 +1757,6 @@ func (v *ResourceView) sortRows() {
 		sortColumnIndex = 0
 	}
 
-	// Create a slice to track the original indices with their identities
-	type rowWithIdentity struct {
-		row      []string
-		identity *ResourceIdentity
-	}
-
 	// Build the slice with rows and their identities
 	rowsWithIdentities := make([]rowWithIdentity, len(v.rows))
 	for i, row := range v.rows {
@@ -1750,14 +1777,26 @@ func (v *ResourceView) sortRows() {
 
 		// Handle numeric columns specially
 		if sortColumn == "READY" || sortColumn == "RESTARTS" || sortColumn == "AGE" {
-			return v.compareNumericValues(valueI, valueJ, v.state.SortAscending)
+			result := v.compareNumericValues(valueI, valueJ, v.state.SortAscending)
+			// If values are equal, use secondary sort
+			if valueI == valueJ {
+				return v.secondarySort(rowsWithIdentities[i], rowsWithIdentities[j])
+			}
+			return result
 		}
 
 		// String comparison
-		if v.state.SortAscending {
-			return strings.ToLower(valueI) < strings.ToLower(valueJ)
+		compareResult := strings.ToLower(valueI) < strings.ToLower(valueJ)
+		if !v.state.SortAscending {
+			compareResult = strings.ToLower(valueI) > strings.ToLower(valueJ)
 		}
-		return strings.ToLower(valueI) > strings.ToLower(valueJ)
+
+		// If primary sort values are equal, use secondary sort
+		if strings.EqualFold(valueI, valueJ) {
+			return v.secondarySort(rowsWithIdentities[i], rowsWithIdentities[j])
+		}
+
+		return compareResult
 	})
 
 	// Rebuild rows and resourceMap with the sorted order
@@ -1769,6 +1808,42 @@ func (v *ResourceView) sortRows() {
 			v.resourceMap[i] = item.identity
 		}
 	}
+}
+
+// secondarySort provides a stable secondary sort when primary values are equal
+// It sorts by context (if multi-context), then by name
+func (v *ResourceView) secondarySort(itemI, itemJ rowWithIdentity) bool {
+	// In multi-context mode, first compare by context if not already sorting by context
+	if v.isMultiContext && v.showContextColumn && v.state.SortColumn != "CONTEXT" {
+		// Context is always the first column in multi-context mode
+		contextI := itemI.row[0]
+		contextJ := itemJ.row[0]
+		if contextI != contextJ {
+			return strings.ToLower(contextI) < strings.ToLower(contextJ)
+		}
+	}
+
+	// Then compare by name if not already sorting by name
+	if v.state.SortColumn != "NAME" {
+		nameColIndex := 0
+		if v.isMultiContext && v.showContextColumn {
+			nameColIndex = 1 // Name is second column in multi-context mode
+		}
+		if nameColIndex < len(itemI.row) && nameColIndex < len(itemJ.row) {
+			nameI := itemI.row[nameColIndex]
+			nameJ := itemJ.row[nameColIndex]
+			if nameI != nameJ {
+				return strings.ToLower(nameI) < strings.ToLower(nameJ)
+			}
+		}
+	}
+
+	// Finally, use UID as the ultimate tiebreaker for absolute stability
+	if itemI.identity != nil && itemJ.identity != nil {
+		return itemI.identity.UID < itemJ.identity.UID
+	}
+
+	return false
 }
 
 // compareNumericValues compares two values that might be numeric

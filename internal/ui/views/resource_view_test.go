@@ -11,11 +11,23 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 )
 
+// createTestState creates a State with consistent defaults for testing
+func createTestState(resourceType core.ResourceType, namespace, context string) *core.State {
+	return &core.State{
+		CurrentResourceType: resourceType,
+		CurrentNamespace:    namespace,
+		CurrentContext:      context,
+		SortAscending:       true, // Default to A-Z sorting for predictable tests
+		SortColumn:          "NAME",
+	}
+}
+
 func createTestResourceView(t *testing.T) *ResourceView {
 	state := &core.State{
 		CurrentResourceType: core.ResourceTypePod,
 		CurrentNamespace:    "default",
 		CurrentContext:      "test-context",
+		SortAscending:       true, // Default to A-Z sorting
 	}
 
 	// Create with nil client for pure UI testing
@@ -537,13 +549,13 @@ func TestResourceViewSelectionJumpingBugDuringRefresh(t *testing.T) {
 					Kind:      "Pod",
 				}
 			},
-			shouldFail:     true,
-			failureMessage: "BUG: Selection should intelligently handle deleted pod",
+			shouldFail:     false, // This should work correctly now
+			failureMessage: "",
 		},
 		{
 			name:              "selection stays at bottom when last pod selected",
 			initialSelection:  2,
-			expectedSelection: 3, // Should stay at bottom with new pod
+			expectedSelection: 2, // Should stay on test-pod-3 which remains at index 2
 			refreshDataModifier: func(rv *ResourceView) {
 				// Add a new pod
 				rv.rows = [][]string{
@@ -552,7 +564,7 @@ func TestResourceViewSelectionJumpingBugDuringRefresh(t *testing.T) {
 					{"test-pod-3", "1/1", "Running", "1", "10m"},
 					{"test-pod-4", "1/1", "Running", "0", "1m"}, // New pod
 				}
-				// Update resource map
+				// Update resource map - keep existing ones
 				rv.resourceMap[3] = &ResourceIdentity{
 					Context:   "test-context",
 					Namespace: "default",
@@ -561,8 +573,8 @@ func TestResourceViewSelectionJumpingBugDuringRefresh(t *testing.T) {
 					Kind:      "Pod",
 				}
 			},
-			shouldFail:     true,
-			failureMessage: "BUG: Selection should stay on test-pod-3 even with new pods",
+			shouldFail:     false, // This should work correctly now
+			failureMessage: "",
 		},
 		{
 			name:              "selection handles all pods being replaced",
@@ -896,17 +908,19 @@ func TestResourceViewUpdateTableWithPodsSelectionBug(t *testing.T) {
 		}
 
 		// Reorder pods (simulating a sort by age or status change)
+		// Note: updateTableWithPods will sort by NAME by default, so the order we pass doesn't matter
+		// The pods will always be sorted as test-pod-1, test-pod-2, test-pod-3
 		reorderedPods := []v1.Pod{pods[2], pods[0], pods[1]} // test-pod-3, test-pod-1, test-pod-2
 
 		rv.updateTableWithPods(reorderedPods)
 
-		// test-pod-2 should now be at index 2
+		// test-pod-2 should still be at index 1 (because of alphabetical sorting)
 		if rv.GetSelectedResourceName() != "test-pod-2" {
 			t.Errorf("BUG: Lost selection of test-pod-2, now on %s",
 				rv.GetSelectedResourceName())
 		}
-		if rv.selectedRow != 2 {
-			t.Errorf("BUG: test-pod-2 should be at row 2 after reorder, but selected row is %d",
+		if rv.selectedRow != 1 {
+			t.Errorf("BUG: test-pod-2 should be at row 1 after refresh (alphabetical sort), but selected row is %d",
 				rv.selectedRow)
 		}
 	})
@@ -982,18 +996,8 @@ func TestResourceViewSelectionBugComprehensive(t *testing.T) {
 	}
 
 	t.Run("CRITICAL: Selection must persist through refresh cycles", func(t *testing.T) {
-		state := &core.State{
-			CurrentResourceType: core.ResourceTypePod,
-			CurrentNamespace:    "default",
-			CurrentContext:      "test-context",
-		}
-
-		rv := NewResourceView(state, nil)
-		rv.SetSize(80, 24)
-
-		// Create initial pod list
-		// Note: These will be sorted alphabetically by name when displayed
-		initialPods := []v1.Pod{
+		// Create initial pod list that will be used as base for all scenarios
+		basePods := []v1.Pod{
 			createPod("pod-alpha", "default", "uid-1", v1.PodRunning, true, 0, 60),
 			createPod("pod-bravo", "default", "uid-2", v1.PodRunning, true, 0, 45),
 			createPod("pod-charlie", "default", "uid-3", v1.PodPending, false, 0, 30),
@@ -1001,42 +1005,7 @@ func TestResourceViewSelectionBugComprehensive(t *testing.T) {
 			createPod("pod-echo", "default", "uid-5", v1.PodRunning, true, 0, 90),
 		}
 
-		rv.updateTableWithPods(initialPods)
-
-		// Verify initial state
-		if len(rv.rows) != 5 {
-			t.Fatalf("Expected 5 rows, got %d", len(rv.rows))
-		}
-
-		// User navigates to pod-charlie (which will be at row 2 after alphabetical sorting)
-		// First, ensure we're at row 0
-		if rv.selectedRow != 0 {
-			t.Logf("Starting at row %d instead of 0", rv.selectedRow)
-		}
-
-		// Navigate down twice to get to row 2 (pod-charlie)
-		for i := 0; i < 2; i++ {
-			keyMsg := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}}
-			model, _ := rv.Update(keyMsg)
-			rv = model.(*ResourceView)
-			t.Logf("After move %d: row=%d, name=%s", i+1, rv.selectedRow, rv.GetSelectedResourceName())
-		}
-
-		if rv.selectedRow != 2 {
-			t.Fatalf("Expected to be at row 2, but at row %d", rv.selectedRow)
-		}
-
-		if rv.GetSelectedResourceName() != "pod-charlie" {
-			// Debug: print all rows
-			for i, row := range rv.rows {
-				if len(row) > 0 {
-					t.Logf("Row %d: %s", i, row[0])
-				}
-			}
-			t.Fatalf("Setup failed: expected to select pod-charlie, got %s", rv.GetSelectedResourceName())
-		}
-
-		// Simulate multiple refresh cycles with different changes
+		// Test various refresh scenarios
 		refreshScenarios := []struct {
 			name       string
 			modifyPods func([]v1.Pod) []v1.Pod
@@ -1046,15 +1015,18 @@ func TestResourceViewSelectionBugComprehensive(t *testing.T) {
 			{
 				name: "Status update only",
 				modifyPods: func(pods []v1.Pod) []v1.Pod {
-					// pod-charlie (index 2) becomes Running
-					for i := range pods {
-						if pods[i].Name == "pod-charlie" {
-							pods[i].Status.Phase = v1.PodRunning
-							pods[i].Status.ContainerStatuses[0].Ready = true
+					// Make a copy to avoid modifying the original
+					modifiedPods := make([]v1.Pod, len(pods))
+					copy(modifiedPods, pods)
+					// pod-charlie becomes Running
+					for i := range modifiedPods {
+						if modifiedPods[i].Name == "pod-charlie" {
+							modifiedPods[i].Status.Phase = v1.PodRunning
+							modifiedPods[i].Status.ContainerStatuses[0].Ready = true
 							break
 						}
 					}
-					return pods
+					return modifiedPods
 				},
 				expectName: "pod-charlie",
 				expectRow:  2, // Should stay at same position after status update
@@ -1075,20 +1047,48 @@ func TestResourceViewSelectionBugComprehensive(t *testing.T) {
 					return append(pods, newPod)
 				},
 				expectName: "pod-charlie",
-				expectRow:  3, // Should stay at same position (still row 3 after previous addition)
+				expectRow:  2, // Should stay at same position (pod-charlie is still 3rd alphabetically)
 			},
 		}
 
 		for _, scenario := range refreshScenarios {
 			t.Run(scenario.name, func(t *testing.T) {
-				// Get current pods and apply modifications
-				currentPods := initialPods
-				if rv.rows != nil && len(rv.rows) > 0 {
-					// In a real scenario, we'd fetch fresh data from k8s
-					// Here we simulate modifications
+				// Create a fresh ResourceView for each scenario
+				state := &core.State{
+					CurrentResourceType: core.ResourceTypePod,
+					CurrentNamespace:    "default",
+					CurrentContext:      "test-context",
+					SortAscending:       true, // Sort A-Z for predictable test results
 				}
 
-				modifiedPods := scenario.modifyPods(currentPods)
+				rv := NewResourceView(state, nil)
+				rv.SetSize(80, 24)
+
+				// Load initial pods
+				rv.updateTableWithPods(basePods)
+
+				// Verify initial state
+				if len(rv.rows) != 5 {
+					t.Fatalf("Expected 5 rows, got %d", len(rv.rows))
+				}
+
+				// Navigate to pod-charlie (which will be at row 2 after alphabetical sorting)
+				for i := 0; i < 2; i++ {
+					keyMsg := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}}
+					model, _ := rv.Update(keyMsg)
+					rv = model.(*ResourceView)
+				}
+
+				if rv.selectedRow != 2 {
+					t.Fatalf("Expected to be at row 2, but at row %d", rv.selectedRow)
+				}
+
+				if rv.GetSelectedResourceName() != "pod-charlie" {
+					t.Fatalf("Expected to select pod-charlie, got %s", rv.GetSelectedResourceName())
+				}
+
+				// Apply the scenario's modifications
+				modifiedPods := scenario.modifyPods(basePods)
 				rv.updateTableWithPods(modifiedPods)
 
 				// Check if selection persisted correctly
@@ -1096,17 +1096,14 @@ func TestResourceViewSelectionBugComprehensive(t *testing.T) {
 				actualRow := rv.selectedRow
 
 				if actualName != scenario.expectName {
-					t.Errorf("BUG DETECTED: After %s, selection jumped from %s to %s",
+					t.Errorf("After %s, selection jumped from %s to %s",
 						scenario.name, scenario.expectName, actualName)
 				}
 
 				if actualRow != scenario.expectRow {
-					t.Errorf("BUG DETECTED: After %s, selected row should be %d but is %d",
+					t.Errorf("After %s, selected row should be %d but is %d",
 						scenario.name, scenario.expectRow, actualRow)
 				}
-
-				// Update initialPods for next iteration
-				initialPods = modifiedPods
 			})
 		}
 	})

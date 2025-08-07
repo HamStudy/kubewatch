@@ -54,4 +54,4 @@ Use these agents for domain-specific tasks:
 - **Log Aggregation:** Stream multiple pod logs concurrently with proper synchronization
 
 ## Project Completion
-Consult Project Completion Validator subagent before marking tasks complete.
+Consult Project Completion Validator subagent before marking tasks complete. It is never acceptable to mark something complete with a failing test, not for any reason.
