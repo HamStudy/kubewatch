@@ -23,8 +23,8 @@ import (
 
 // Client represents a Kubernetes client
 type Client struct {
-	clientset     *kubernetes.Clientset
-	metricsClient *metricsclient.Clientset
+	clientset     kubernetes.Interface
+	metricsClient metricsclient.Interface
 	config        *rest.Config
 }
 
@@ -53,6 +53,26 @@ func getPathSeparator() string {
 		return ";"
 	}
 	return ":"
+}
+
+// NewClientFromConfig creates a new Kubernetes client from a rest.Config
+func NewClientFromConfig(config *rest.Config) (*Client, error) {
+	clientset, err := kubernetes.NewForConfig(config)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create clientset: %w", err)
+	}
+
+	metricsClient, err := metricsclient.NewForConfig(config)
+	if err != nil {
+		// Metrics client is optional, so we don't fail if it can't be created
+		metricsClient = nil
+	}
+
+	return &Client{
+		clientset:     clientset,
+		metricsClient: metricsClient,
+		config:        config,
+	}, nil
 }
 
 // NewClient creates a new Kubernetes client
@@ -107,19 +127,7 @@ func NewClient(kubeconfig string) (*Client, error) {
 		}
 	}
 
-	clientset, err := kubernetes.NewForConfig(config)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create clientset: %w", err)
-	}
-
-	// Create metrics client (optional - don't fail if metrics API is not available)
-	metricsClient, _ := metricsclient.NewForConfig(config)
-
-	return &Client{
-		clientset:     clientset,
-		metricsClient: metricsClient,
-		config:        config,
-	}, nil
+	return NewClientFromConfig(config)
 }
 
 // NewClientWithOptions creates a new Kubernetes client with additional options
@@ -235,19 +243,7 @@ func NewClientWithOptions(kubeconfig string, opts *ClientOptions) (*Client, erro
 		}
 	}
 
-	clientset, err := kubernetes.NewForConfig(config)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create clientset: %w", err)
-	}
-
-	// Create metrics client (optional - don't fail if metrics API is not available)
-	metricsClient, _ := metricsclient.NewForConfig(config)
-
-	return &Client{
-		clientset:     clientset,
-		metricsClient: metricsClient,
-		config:        config,
-	}, nil
+	return NewClientFromConfig(config)
 }
 
 // GetNamespaces returns all namespaces
@@ -621,4 +617,174 @@ type NodeMetrics struct {
 	Name   string
 	CPU    string
 	Memory string
+}
+
+// DescribeResource returns detailed information about a resource (similar to kubectl describe)
+func (c *Client) DescribeResource(ctx context.Context, resourceType interface{}, name, namespace string) (string, error) {
+	// Import the core package to access ResourceType
+	switch rt := resourceType.(type) {
+	case string:
+		// Handle string resource type
+		switch strings.ToLower(rt) {
+		case "pod", "pods":
+			return c.describePod(ctx, name, namespace)
+		case "deployment", "deployments":
+			return c.describeDeployment(ctx, name, namespace)
+		case "service", "services":
+			return c.describeService(ctx, name, namespace)
+		default:
+			return "", fmt.Errorf("unsupported resource type: %s", rt)
+		}
+	default:
+		// Handle core.ResourceType enum
+		resourceTypeStr := fmt.Sprintf("%v", resourceType)
+		switch strings.ToLower(resourceTypeStr) {
+		case "pod", "pods":
+			return c.describePod(ctx, name, namespace)
+		case "deployment", "deployments":
+			return c.describeDeployment(ctx, name, namespace)
+		case "service", "services":
+			return c.describeService(ctx, name, namespace)
+		default:
+			return "", fmt.Errorf("unsupported resource type: %v", resourceType)
+		}
+	}
+}
+
+// describePod returns detailed information about a pod
+func (c *Client) describePod(ctx context.Context, name, namespace string) (string, error) {
+	pod, err := c.clientset.CoreV1().Pods(namespace).Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		return "", fmt.Errorf("failed to get pod: %w", err)
+	}
+
+	var result strings.Builder
+	result.WriteString(fmt.Sprintf("Name:         %s\n", pod.Name))
+	result.WriteString(fmt.Sprintf("Namespace:    %s\n", pod.Namespace))
+	result.WriteString(fmt.Sprintf("Node:         %s\n", pod.Spec.NodeName))
+	result.WriteString(fmt.Sprintf("Status:       %s\n", pod.Status.Phase))
+	result.WriteString(fmt.Sprintf("IP:           %s\n", pod.Status.PodIP))
+	result.WriteString(fmt.Sprintf("Created:      %s\n", pod.CreationTimestamp.Format(time.RFC3339)))
+
+	if len(pod.Labels) > 0 {
+		result.WriteString("\nLabels:\n")
+		for k, v := range pod.Labels {
+			result.WriteString(fmt.Sprintf("  %s=%s\n", k, v))
+		}
+	}
+
+	if len(pod.Spec.Containers) > 0 {
+		result.WriteString("\nContainers:\n")
+		for _, container := range pod.Spec.Containers {
+			result.WriteString(fmt.Sprintf("  %s:\n", container.Name))
+			result.WriteString(fmt.Sprintf("    Image:      %s\n", container.Image))
+			if len(container.Ports) > 0 {
+				for _, port := range container.Ports {
+					result.WriteString(fmt.Sprintf("    Port:       %d/%s\n", port.ContainerPort, port.Protocol))
+				}
+			}
+		}
+	}
+
+	// Add container statuses
+	if len(pod.Status.ContainerStatuses) > 0 {
+		result.WriteString("\nContainer Statuses:\n")
+		for _, status := range pod.Status.ContainerStatuses {
+			result.WriteString(fmt.Sprintf("  %s:\n", status.Name))
+			result.WriteString(fmt.Sprintf("    Ready:          %t\n", status.Ready))
+			result.WriteString(fmt.Sprintf("    Restart Count:  %d\n", status.RestartCount))
+			if status.State.Running != nil {
+				result.WriteString(fmt.Sprintf("    State:          Running (started %s)\n", status.State.Running.StartedAt.Format(time.RFC3339)))
+			} else if status.State.Waiting != nil {
+				result.WriteString(fmt.Sprintf("    State:          Waiting (%s)\n", status.State.Waiting.Reason))
+			} else if status.State.Terminated != nil {
+				result.WriteString(fmt.Sprintf("    State:          Terminated (%s)\n", status.State.Terminated.Reason))
+			}
+		}
+	}
+
+	return result.String(), nil
+}
+
+// describeDeployment returns detailed information about a deployment
+func (c *Client) describeDeployment(ctx context.Context, name, namespace string) (string, error) {
+	deployment, err := c.clientset.AppsV1().Deployments(namespace).Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		return "", fmt.Errorf("failed to get deployment: %w", err)
+	}
+
+	var result strings.Builder
+	result.WriteString(fmt.Sprintf("Name:         %s\n", deployment.Name))
+	result.WriteString(fmt.Sprintf("Namespace:    %s\n", deployment.Namespace))
+	result.WriteString(fmt.Sprintf("Created:      %s\n", deployment.CreationTimestamp.Format(time.RFC3339)))
+
+	if deployment.Spec.Replicas != nil {
+		result.WriteString(fmt.Sprintf("Replicas:     %d desired | %d updated | %d total | %d available | %d unavailable\n",
+			*deployment.Spec.Replicas,
+			deployment.Status.UpdatedReplicas,
+			deployment.Status.Replicas,
+			deployment.Status.AvailableReplicas,
+			deployment.Status.UnavailableReplicas))
+	}
+
+	if deployment.Spec.Strategy.Type != "" {
+		result.WriteString(fmt.Sprintf("Strategy:     %s\n", deployment.Spec.Strategy.Type))
+	}
+
+	if deployment.Spec.Selector != nil && len(deployment.Spec.Selector.MatchLabels) > 0 {
+		result.WriteString("Selector:\n")
+		for k, v := range deployment.Spec.Selector.MatchLabels {
+			result.WriteString(fmt.Sprintf("  %s=%s\n", k, v))
+		}
+	}
+
+	if len(deployment.Labels) > 0 {
+		result.WriteString("\nLabels:\n")
+		for k, v := range deployment.Labels {
+			result.WriteString(fmt.Sprintf("  %s=%s\n", k, v))
+		}
+	}
+
+	return result.String(), nil
+}
+
+// describeService returns detailed information about a service
+func (c *Client) describeService(ctx context.Context, name, namespace string) (string, error) {
+	service, err := c.clientset.CoreV1().Services(namespace).Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		return "", fmt.Errorf("failed to get service: %w", err)
+	}
+
+	var result strings.Builder
+	result.WriteString(fmt.Sprintf("Name:         %s\n", service.Name))
+	result.WriteString(fmt.Sprintf("Namespace:    %s\n", service.Namespace))
+	result.WriteString(fmt.Sprintf("Type:         %s\n", service.Spec.Type))
+	result.WriteString(fmt.Sprintf("Cluster IP:   %s\n", service.Spec.ClusterIP))
+	result.WriteString(fmt.Sprintf("Created:      %s\n", service.CreationTimestamp.Format(time.RFC3339)))
+
+	if len(service.Spec.Ports) > 0 {
+		result.WriteString("\nPorts:\n")
+		for _, port := range service.Spec.Ports {
+			result.WriteString(fmt.Sprintf("  %s %d/%s\n", port.Name, port.Port, port.Protocol))
+			if port.NodePort != 0 {
+				result.WriteString(fmt.Sprintf("    NodePort: %d\n", port.NodePort))
+			}
+		}
+	}
+
+	if len(service.Spec.Selector) > 0 {
+		result.WriteString("\nSelector:\n")
+		for k, v := range service.Spec.Selector {
+			result.WriteString(fmt.Sprintf("  %s=%s\n", k, v))
+		}
+	}
+
+	if len(service.Labels) > 0 {
+		result.WriteString("\nLabels:\n")
+		for k, v := range service.Labels {
+			result.WriteString(fmt.Sprintf("  %s=%s\n", k, v))
+		}
+	}
+
+	return result.String(), nil
 }

@@ -1,0 +1,2048 @@
+package views
+
+import (
+	"context"
+	"fmt"
+	"sort"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/HamStudy/kubewatch/internal/core"
+	"github.com/HamStudy/kubewatch/internal/k8s"
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
+	appsv1 "k8s.io/api/apps/v1"
+	v1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
+)
+
+// ResourceView displays a list of Kubernetes resources
+// ResourceIdentity uniquely identifies a Kubernetes resource
+type ResourceIdentity struct {
+	Context   string // Kubernetes context (for multi-context mode)
+	Namespace string // Kubernetes namespace
+	Name      string // Resource name
+	UID       string // Kubernetes UID (most unique identifier)
+	Kind      string // Resource kind (Pod, Deployment, etc.)
+}
+
+type ResourceView struct {
+	state            *core.State
+	k8sClient        *k8s.Client
+	width            int
+	height           int
+	wordWrap         bool
+	showMetrics      bool
+	podMetrics       map[string]*k8s.PodMetrics
+	horizontalOffset int
+	lastRefresh      time.Time
+	compactMode      bool // For split view with logs
+
+	// Multi-context support
+	multiClient       *k8s.MultiContextClient
+	isMultiContext    bool
+	showContextColumn bool
+
+	// Custom table data
+	headers        []string
+	rows           [][]string
+	columnWidths   []int
+	selectedRow    int
+	viewportStart  int
+	viewportHeight int
+
+	// Selection tracking
+	selectedIdentity *ResourceIdentity         // Track the actual selected resource
+	resourceMap      map[int]*ResourceIdentity // Map row index to resource identity
+}
+
+// NewResourceView creates a new resource view
+func NewResourceView(state *core.State, k8sClient *k8s.Client) *ResourceView {
+	rv := &ResourceView{
+		state:             state,
+		k8sClient:         k8sClient,
+		wordWrap:          false,
+		showMetrics:       true,
+		podMetrics:        make(map[string]*k8s.PodMetrics),
+		selectedRow:       0,
+		isMultiContext:    false,
+		showContextColumn: false,
+		resourceMap:       make(map[int]*ResourceIdentity),
+	}
+
+	// Set initial columns based on resource type
+	rv.updateColumnsForResourceType()
+
+	return rv
+}
+
+// NewResourceViewWithMultiContext creates a new resource view with multi-context support
+func NewResourceViewWithMultiContext(state *core.State, multiClient *k8s.MultiContextClient) *ResourceView {
+	rv := &ResourceView{
+		state:             state,
+		multiClient:       multiClient,
+		wordWrap:          false,
+		showMetrics:       true,
+		podMetrics:        make(map[string]*k8s.PodMetrics),
+		selectedRow:       0,
+		isMultiContext:    true,
+		showContextColumn: true,
+		resourceMap:       make(map[int]*ResourceIdentity),
+	}
+
+	// Set initial columns based on resource type
+	rv.updateColumnsForResourceType()
+
+	return rv
+}
+
+// Init initializes the view
+func (v *ResourceView) Init() tea.Cmd {
+	return v.RefreshResources()
+}
+
+// Update handles messages
+func (v *ResourceView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.KeyMsg:
+		switch msg.String() {
+		case "j", "down":
+			// Move down
+			if v.selectedRow < len(v.rows)-1 {
+				v.selectedRow++
+			}
+			return v, nil
+		case "k", "up":
+			// Move up
+			if v.selectedRow > 0 {
+				v.selectedRow--
+			}
+			return v, nil
+		case "u":
+			// Toggle word wrap
+			v.wordWrap = !v.wordWrap
+			return v, nil
+		case "home":
+			v.selectedRow = 0
+			return v, nil
+		case "end":
+			if len(v.rows) > 0 {
+				v.selectedRow = len(v.rows) - 1
+			}
+			return v, nil
+		case "pgup":
+			// Page up
+			if v.selectedRow > v.viewportHeight {
+				v.selectedRow -= v.viewportHeight
+			} else {
+				v.selectedRow = 0
+			}
+			return v, nil
+		case "pgdown":
+			// Page down
+			if v.selectedRow < len(v.rows)-v.viewportHeight {
+				v.selectedRow += v.viewportHeight
+			} else if len(v.rows) > 0 {
+				v.selectedRow = len(v.rows) - 1
+			}
+			return v, nil
+		case "h", "left":
+			// Scroll left
+			if v.horizontalOffset > 0 {
+				v.horizontalOffset -= 5
+			}
+			return v, nil
+		case "l", "right":
+			// Scroll right
+			v.horizontalOffset += 5
+			return v, nil
+		}
+	}
+
+	return v, nil
+}
+
+// View renders the view
+func (v *ResourceView) View() string {
+	header := v.renderHeader()
+	// Use custom renderer instead of table.View()
+	tableView := v.renderCustomTable()
+	return lipgloss.JoinVertical(lipgloss.Left, header, tableView)
+}
+
+// SetSize updates the view size
+func (v *ResourceView) SetSize(width, height int) {
+	v.width = width
+	v.height = height
+	if v.compactMode {
+		// In compact mode, ensure selected item stays visible with minimal context
+		v.viewportHeight = height - 3 // Less space for header in compact mode
+	} else {
+		v.viewportHeight = height - 6 // Account for header and borders
+	}
+}
+
+// SetCompactMode enables/disables compact mode for split view
+func (v *ResourceView) SetCompactMode(compact bool) {
+	v.compactMode = compact
+	if compact {
+		// Adjust viewport to keep selected item visible
+		v.ensureSelectedVisible()
+	}
+}
+
+// ensureSelectedVisible adjusts viewport to keep selected item in view
+func (v *ResourceView) ensureSelectedVisible() {
+	// First ensure selectedRow is within bounds
+	if v.selectedRow >= len(v.rows) && len(v.rows) > 0 {
+		v.selectedRow = len(v.rows) - 1
+	}
+	if v.selectedRow < 0 && len(v.rows) > 0 {
+		v.selectedRow = 0
+	}
+
+	// Ensure viewportStart is within bounds
+	if v.viewportStart >= len(v.rows) {
+		v.viewportStart = 0
+		if len(v.rows) > v.viewportHeight {
+			v.viewportStart = len(v.rows) - v.viewportHeight
+		}
+	}
+	if v.viewportStart < 0 {
+		v.viewportStart = 0
+	}
+
+	// Adjust viewport to keep selected item visible
+	if v.selectedRow < v.viewportStart {
+		v.viewportStart = v.selectedRow
+	} else if v.selectedRow >= v.viewportStart+v.viewportHeight {
+		v.viewportStart = v.selectedRow - v.viewportHeight + 1
+	}
+
+	// Ensure we show at least 3 items around selected if possible
+	contextRows := 3
+	if v.viewportHeight > contextRows*2 && len(v.rows) > 0 {
+		idealStart := v.selectedRow - contextRows
+		if idealStart >= 0 && idealStart+v.viewportHeight <= len(v.rows) {
+			v.viewportStart = idealStart
+		}
+	}
+}
+
+// RefreshResources fetches and updates the resource list
+func (v *ResourceView) RefreshResources() tea.Cmd {
+	return func() tea.Msg {
+		ctx := context.Background()
+
+		if v.isMultiContext && v.multiClient != nil {
+			return v.refreshMultiContextResources(ctx)
+		}
+
+		// Check if we have a valid client
+		if v.k8sClient == nil {
+			return errMsg{fmt.Errorf("no kubernetes client available")}
+		}
+
+		switch v.state.CurrentResourceType {
+		case core.ResourceTypePod:
+			pods, err := v.k8sClient.ListPods(ctx, v.state.CurrentNamespace)
+			if err != nil {
+				return errMsg{err}
+			}
+
+			// Try to get metrics (don't fail if not available)
+			metrics, _ := v.k8sClient.GetPodMetrics(ctx, v.state.CurrentNamespace)
+			v.podMetrics = metrics
+
+			v.state.UpdatePods(pods)
+			v.updateTableWithPods(pods)
+
+		case core.ResourceTypeDeployment:
+			deployments, err := v.k8sClient.ListDeployments(ctx, v.state.CurrentNamespace)
+			if err != nil {
+				return errMsg{err}
+			}
+			v.state.UpdateDeployments(deployments)
+			v.updateTableWithDeployments(deployments)
+
+		case core.ResourceTypeStatefulSet:
+			statefulsets, err := v.k8sClient.ListStatefulSets(ctx, v.state.CurrentNamespace)
+			if err != nil {
+				return errMsg{err}
+			}
+			v.state.UpdateStatefulSets(statefulsets)
+			v.updateTableWithStatefulSets(statefulsets)
+
+		case core.ResourceTypeService:
+			services, err := v.k8sClient.ListServices(ctx, v.state.CurrentNamespace)
+			if err != nil {
+				return errMsg{err}
+			}
+			v.state.UpdateServices(services)
+			v.updateTableWithServices(services)
+
+		case core.ResourceTypeIngress:
+			ingresses, err := v.k8sClient.ListIngresses(ctx, v.state.CurrentNamespace)
+			if err != nil {
+				return errMsg{err}
+			}
+			v.state.UpdateIngresses(ingresses)
+			v.updateTableWithIngresses(ingresses)
+
+		case core.ResourceTypeConfigMap:
+			configmaps, err := v.k8sClient.ListConfigMaps(ctx, v.state.CurrentNamespace)
+			if err != nil {
+				return errMsg{err}
+			}
+			v.state.UpdateConfigMaps(configmaps)
+			v.updateTableWithConfigMaps(configmaps)
+
+		case core.ResourceTypeSecret:
+			secrets, err := v.k8sClient.ListSecrets(ctx, v.state.CurrentNamespace)
+			if err != nil {
+				return errMsg{err}
+			}
+			v.state.UpdateSecrets(secrets)
+			v.updateTableWithSecrets(secrets)
+		}
+
+		// Update last refresh time
+		v.lastRefresh = time.Now()
+
+		return refreshCompleteMsg{}
+	}
+}
+
+// refreshMultiContextResources fetches resources from all active contexts
+func (v *ResourceView) refreshMultiContextResources(ctx context.Context) tea.Msg {
+	switch v.state.CurrentResourceType {
+	case core.ResourceTypePod:
+		podsWithContext, err := v.multiClient.ListPodsAllContexts(ctx, v.state.CurrentNamespace)
+		if err != nil {
+			return errMsg{err}
+		}
+
+		// Update state with aggregated pods
+		var allPods []v1.Pod
+		for _, pwc := range podsWithContext {
+			allPods = append(allPods, pwc.Pod)
+			// Store pods by context
+			v.state.UpdatePodsByContext(pwc.Context, []v1.Pod{pwc.Pod})
+		}
+
+		v.state.UpdatePods(allPods)
+		v.updateTableWithPodsMultiContext(podsWithContext)
+
+	case core.ResourceTypeDeployment:
+		deploymentsWithContext, err := v.multiClient.ListDeploymentsAllContexts(ctx, v.state.CurrentNamespace)
+		if err != nil {
+			return errMsg{err}
+		}
+
+		// Update state with aggregated deployments
+		var allDeployments []appsv1.Deployment
+		for _, dwc := range deploymentsWithContext {
+			allDeployments = append(allDeployments, dwc.Deployment)
+			v.state.UpdateDeploymentsByContext(dwc.Context, []appsv1.Deployment{dwc.Deployment})
+		}
+
+		v.state.UpdateDeployments(allDeployments)
+		v.updateTableWithDeploymentsMultiContext(deploymentsWithContext)
+
+	// Add other resource types as needed
+	default:
+		// For now, fall back to single context for unsupported resource types
+		if len(v.state.CurrentContexts) > 0 {
+			client, err := v.multiClient.GetClient(v.state.CurrentContexts[0])
+			if err != nil {
+				return errMsg{err}
+			}
+			v.k8sClient = client
+			return v.refreshSingleContextResources(ctx)
+		}
+	}
+
+	// Update last refresh time
+	v.lastRefresh = time.Now()
+	return refreshCompleteMsg{}
+}
+
+// refreshSingleContextResources is the original single-context refresh logic
+func (v *ResourceView) refreshSingleContextResources(ctx context.Context) tea.Msg {
+	switch v.state.CurrentResourceType {
+	case core.ResourceTypePod:
+		pods, err := v.k8sClient.ListPods(ctx, v.state.CurrentNamespace)
+		if err != nil {
+			return errMsg{err}
+		}
+
+		// Try to get metrics (don't fail if not available)
+		metrics, _ := v.k8sClient.GetPodMetrics(ctx, v.state.CurrentNamespace)
+		v.podMetrics = metrics
+
+		v.state.UpdatePods(pods)
+		v.updateTableWithPods(pods)
+
+	case core.ResourceTypeDeployment:
+		deployments, err := v.k8sClient.ListDeployments(ctx, v.state.CurrentNamespace)
+		if err != nil {
+			return errMsg{err}
+		}
+		v.state.UpdateDeployments(deployments)
+		v.updateTableWithDeployments(deployments)
+
+	case core.ResourceTypeStatefulSet:
+		statefulsets, err := v.k8sClient.ListStatefulSets(ctx, v.state.CurrentNamespace)
+		if err != nil {
+			return errMsg{err}
+		}
+		v.state.UpdateStatefulSets(statefulsets)
+		v.updateTableWithStatefulSets(statefulsets)
+
+	case core.ResourceTypeService:
+		services, err := v.k8sClient.ListServices(ctx, v.state.CurrentNamespace)
+		if err != nil {
+			return errMsg{err}
+		}
+		v.state.UpdateServices(services)
+		v.updateTableWithServices(services)
+
+	case core.ResourceTypeIngress:
+		ingresses, err := v.k8sClient.ListIngresses(ctx, v.state.CurrentNamespace)
+		if err != nil {
+			return errMsg{err}
+		}
+		v.state.UpdateIngresses(ingresses)
+		v.updateTableWithIngresses(ingresses)
+
+	case core.ResourceTypeConfigMap:
+		configmaps, err := v.k8sClient.ListConfigMaps(ctx, v.state.CurrentNamespace)
+		if err != nil {
+			return errMsg{err}
+		}
+		v.state.UpdateConfigMaps(configmaps)
+		v.updateTableWithConfigMaps(configmaps)
+
+	case core.ResourceTypeSecret:
+		secrets, err := v.k8sClient.ListSecrets(ctx, v.state.CurrentNamespace)
+		if err != nil {
+			return errMsg{err}
+		}
+		v.state.UpdateSecrets(secrets)
+		v.updateTableWithSecrets(secrets)
+	}
+
+	// Update last refresh time
+	v.lastRefresh = time.Now()
+	return refreshCompleteMsg{}
+}
+
+// GetSelectedResourceName returns the name of the currently selected resource
+func (v *ResourceView) GetSelectedResourceName() string {
+	if v.selectedRow >= 0 && v.selectedRow < len(v.rows) && len(v.rows) > 0 {
+		selectedRow := v.rows[v.selectedRow]
+		if v.isMultiContext && v.showContextColumn && len(selectedRow) >= 2 {
+			return selectedRow[1] // Second column is NAME in multi-context mode
+		} else if len(selectedRow) >= 1 {
+			return selectedRow[0] // First column is NAME in single context mode
+		}
+	}
+	return ""
+}
+
+// GetSelectedResourceContext returns the context of the currently selected resource (multi-context mode)
+func (v *ResourceView) GetSelectedResourceContext() string {
+	if !v.isMultiContext {
+		return ""
+	}
+
+	if v.selectedIdentity != nil {
+		return v.selectedIdentity.Context
+	}
+
+	// Fallback to old method if identity not available
+	if v.selectedRow >= 0 && v.selectedRow < len(v.rows) && len(v.rows) > 0 {
+		selectedRow := v.rows[v.selectedRow]
+		if len(selectedRow) >= 1 {
+			return selectedRow[0] // First column is CONTEXT in multi-context mode
+		}
+	}
+	return ""
+}
+
+// saveSelectedIdentity stores the identity of the currently selected resource
+func (v *ResourceView) saveSelectedIdentity() {
+	if v.selectedRow >= 0 && v.selectedRow < len(v.rows) {
+		if identity, exists := v.resourceMap[v.selectedRow]; exists {
+			v.selectedIdentity = identity
+		}
+	}
+}
+
+// findResourceByIdentity searches for a resource by its identity and returns the row index
+func (v *ResourceView) findResourceByIdentity(identity *ResourceIdentity) int {
+	if identity == nil {
+		return -1
+	}
+
+	for rowIndex, resourceIdentity := range v.resourceMap {
+		if resourceIdentity != nil &&
+			resourceIdentity.UID == identity.UID &&
+			resourceIdentity.Context == identity.Context &&
+			resourceIdentity.Namespace == identity.Namespace &&
+			resourceIdentity.Name == identity.Name {
+			return rowIndex
+		}
+	}
+	return -1
+}
+
+// restoreSelectionByIdentity attempts to restore the previously selected resource by identity
+func (v *ResourceView) restoreSelectionByIdentity() {
+	if v.selectedIdentity == nil {
+		return
+	}
+
+	// Try to find the resource by its identity
+	newIndex := v.findResourceByIdentity(v.selectedIdentity)
+	if newIndex >= 0 {
+		v.selectedRow = newIndex
+		return
+	}
+
+	// If exact match not found, try to find by name and context (less precise)
+	for rowIndex, identity := range v.resourceMap {
+		if identity != nil &&
+			identity.Name == v.selectedIdentity.Name &&
+			identity.Context == v.selectedIdentity.Context &&
+			identity.Namespace == v.selectedIdentity.Namespace {
+			v.selectedRow = rowIndex
+			return
+		}
+	}
+
+	// If still not found, keep current index but ensure it's valid
+	if v.selectedRow >= len(v.rows) {
+		v.selectedRow = len(v.rows) - 1
+	}
+	if v.selectedRow < 0 && len(v.rows) > 0 {
+		v.selectedRow = 0
+	}
+}
+
+// DeleteSelected deletes the selected resource(s)
+func (v *ResourceView) DeleteSelected() tea.Cmd {
+	return func() tea.Msg {
+		ctx := context.Background()
+
+		// Check if we have a selected row
+		if v.selectedRow >= len(v.rows) || v.selectedRow < 0 {
+			return nil
+		}
+
+		selectedRow := v.rows[v.selectedRow]
+		if len(selectedRow) == 0 {
+			return nil
+		}
+
+		// Extract name and context based on multi-context mode
+		var name, contextName string
+		var client *k8s.Client
+
+		if v.isMultiContext && v.showContextColumn {
+			// In multi-context mode: [CONTEXT, NAME, ...]
+			if len(selectedRow) < 2 {
+				return nil
+			}
+			contextName = selectedRow[0]
+			name = selectedRow[1]
+
+			// Get the appropriate client for this context
+			var err error
+			client, err = v.multiClient.GetClient(contextName)
+			if err != nil {
+				return errMsg{err}
+			}
+		} else {
+			// Single context mode: [NAME, ...]
+			name = selectedRow[0]
+			client = v.k8sClient
+		}
+
+		namespace := v.state.CurrentNamespace
+
+		var err error
+		switch v.state.CurrentResourceType {
+		case core.ResourceTypePod:
+			err = client.DeletePod(ctx, namespace, name)
+		case core.ResourceTypeDeployment:
+			err = client.DeleteDeployment(ctx, namespace, name)
+		case core.ResourceTypeStatefulSet:
+			err = client.DeleteStatefulSet(ctx, namespace, name)
+		case core.ResourceTypeService:
+			err = client.DeleteService(ctx, namespace, name)
+		case core.ResourceTypeIngress:
+			err = client.DeleteIngress(ctx, namespace, name)
+		case core.ResourceTypeConfigMap:
+			err = client.DeleteConfigMap(ctx, namespace, name)
+		case core.ResourceTypeSecret:
+			err = client.DeleteSecret(ctx, namespace, name)
+		}
+
+		if err != nil {
+			return errMsg{err}
+		}
+
+		return deleteCompleteMsg{name}
+	}
+}
+
+// renderCustomTable renders the table using lipgloss styling
+func (v *ResourceView) renderCustomTable() string {
+	if len(v.headers) == 0 || len(v.rows) == 0 {
+		return "No resources found"
+	}
+
+	// Ensure selectedRow is within bounds
+	if v.selectedRow >= len(v.rows) {
+		v.selectedRow = len(v.rows) - 1
+	}
+	if v.selectedRow < 0 {
+		v.selectedRow = 0
+	}
+
+	// Ensure columnWidths is initialized and matches headers
+	if len(v.columnWidths) != len(v.headers) {
+		v.calculateColumnWidths()
+	}
+
+	// Render header
+	var headerCells []string
+	for i, header := range v.headers {
+		width := 15 // default width
+		if i < len(v.columnWidths) {
+			width = v.columnWidths[i]
+		}
+		cell := v.styleHeaderCell(header, width)
+		headerCells = append(headerCells, cell)
+	}
+	headerRow := strings.Join(headerCells, " ")
+
+	// Style the header with border
+	headerStyle := lipgloss.NewStyle().
+		Bold(true).
+		Foreground(lipgloss.Color("7")).
+		BorderBottom(true).
+		BorderStyle(lipgloss.NormalBorder()).
+		BorderForeground(lipgloss.Color("240")).
+		Width(v.width)
+	styledHeader := headerStyle.Render(headerRow)
+
+	// Calculate viewport
+	if v.viewportHeight == 0 {
+		v.viewportHeight = v.height - 6 // Account for header and borders
+	}
+
+	// Ensure selected row is within bounds
+	if v.selectedRow >= len(v.rows) && len(v.rows) > 0 {
+		v.selectedRow = len(v.rows) - 1
+	}
+	if v.selectedRow < 0 && len(v.rows) > 0 {
+		v.selectedRow = 0
+	}
+
+	// Ensure viewportStart is within bounds
+	if v.viewportStart >= len(v.rows) {
+		v.viewportStart = 0
+		if len(v.rows) > v.viewportHeight {
+			v.viewportStart = len(v.rows) - v.viewportHeight
+		}
+	}
+	if v.viewportStart < 0 {
+		v.viewportStart = 0
+	}
+
+	// Ensure selected row is visible
+	if v.selectedRow < v.viewportStart {
+		v.viewportStart = v.selectedRow
+	} else if v.selectedRow >= v.viewportStart+v.viewportHeight {
+		v.viewportStart = v.selectedRow - v.viewportHeight + 1
+	}
+
+	// Render visible rows
+	var renderedRows []string
+	endRow := v.viewportStart + v.viewportHeight
+	if endRow > len(v.rows) {
+		endRow = len(v.rows)
+	}
+
+	for i := v.viewportStart; i < endRow && i < len(v.rows); i++ {
+		if i < 0 || i >= len(v.rows) {
+			continue // Skip invalid indices
+		}
+		row := v.rows[i]
+		isSelected := i == v.selectedRow
+		var cells []string
+
+		for j, cell := range row {
+			if j < len(v.headers) {
+				width := 15 // default width
+				if j < len(v.columnWidths) {
+					width = v.columnWidths[j]
+				}
+				styledCell := v.styleCellByColumn(v.headers[j], cell, width, isSelected)
+				cells = append(cells, styledCell)
+			}
+		}
+
+		rowStr := strings.Join(cells, " ")
+		renderedRows = append(renderedRows, rowStr)
+	}
+
+	// Join all rows
+	tableContent := strings.Join(renderedRows, "\n")
+
+	// Add scroll indicators if needed
+	if v.viewportStart > 0 || endRow < len(v.rows) {
+		scrollInfo := fmt.Sprintf(" [%d-%d of %d]", v.viewportStart+1, endRow, len(v.rows))
+		scrollStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
+		tableContent += "\n" + scrollStyle.Render(scrollInfo)
+	}
+
+	// Combine header and content
+	return lipgloss.JoinVertical(lipgloss.Left, styledHeader, tableContent)
+}
+
+// styleHeaderCell styles a header cell
+func (v *ResourceView) styleHeaderCell(header string, width int) string {
+	style := lipgloss.NewStyle().Width(width).Bold(true)
+
+	// Right-align numeric columns
+	if header == "CPU" || header == "MEMORY" || header == "READY" ||
+		header == "RESTARTS" || header == "DATA" || header == "UP-TO-DATE" ||
+		header == "AVAILABLE" {
+		style = style.Align(lipgloss.Right)
+	}
+
+	return style.Render(header)
+}
+
+// styleCellByColumn applies appropriate styling based on column type
+func (v *ResourceView) styleCellByColumn(columnName, value string, width int, isSelected bool) string {
+	// Handle word wrap
+	displayValue := value
+	actualWidth := width
+
+	if v.wordWrap {
+		// When wrap is ON, respect the column width and truncate if needed
+		if len(value) > width-2 && width > 5 {
+			displayValue = value[:width-5] + "..."
+		}
+	} else {
+		// When wrap is OFF, don't truncate - show full content
+		// Adjust width if content is longer
+		if len(value) > width {
+			actualWidth = len(value) + 2
+		}
+	}
+
+	switch columnName {
+	case "STATUS":
+		return v.styleStatusCell(displayValue, actualWidth, isSelected)
+	case "CPU":
+		return v.styleMetricCell(displayValue, actualWidth, isSelected, true)
+	case "MEMORY":
+		return v.styleMetricCell(displayValue, actualWidth, isSelected, false)
+	case "RESTARTS":
+		return v.styleRestartsCell(displayValue, actualWidth, isSelected)
+	case "READY", "UP-TO-DATE", "AVAILABLE", "DATA":
+		// Right-align numeric columns
+		style := lipgloss.NewStyle().Width(actualWidth).Align(lipgloss.Right)
+		if isSelected {
+			style = style.Background(lipgloss.Color("57")).Foreground(lipgloss.Color("229"))
+		}
+		return style.Render(displayValue)
+	default:
+		// Default left-aligned
+		style := lipgloss.NewStyle().Width(actualWidth)
+		if isSelected {
+			style = style.Background(lipgloss.Color("57")).Foreground(lipgloss.Color("229"))
+		}
+		return style.Render(displayValue)
+	}
+}
+
+// styleStatusCell applies color based on pod status
+func (v *ResourceView) styleStatusCell(status string, width int, isSelected bool) string {
+	style := lipgloss.NewStyle().Width(width)
+
+	// Apply selection background
+	if isSelected {
+		style = style.Background(lipgloss.Color("57")).Foreground(lipgloss.Color("229"))
+		return style.Render(status)
+	}
+
+	// Apply status-based colors
+	switch status {
+	case "Running":
+		style = style.Foreground(lipgloss.Color("2")) // Green
+	case "Pending", "ContainerCreating":
+		style = style.Foreground(lipgloss.Color("3")) // Yellow
+	case "Failed", "Error", "CrashLoopBackOff", "ImagePullBackOff":
+		style = style.Foreground(lipgloss.Color("1")) // Red
+	case "Completed":
+		style = style.Foreground(lipgloss.Color("4")) // Blue
+	case "Terminating":
+		style = style.Foreground(lipgloss.Color("5")) // Magenta
+	default:
+		style = style.Foreground(lipgloss.Color("7")) // Default
+	}
+
+	return style.Render(status)
+}
+
+// styleMetricCell applies color based on resource usage
+func (v *ResourceView) styleMetricCell(value string, width int, isSelected bool, isCPU bool) string {
+	style := lipgloss.NewStyle().Width(width).Align(lipgloss.Right)
+
+	// Apply selection background
+	if isSelected {
+		style = style.Background(lipgloss.Color("57")).Foreground(lipgloss.Color("229"))
+		return style.Render(value)
+	}
+
+	// Skip if no value or "-"
+	if value == "-" || value == "" {
+		style = style.Foreground(lipgloss.Color("241")) // Gray for no data
+		return style.Render(value)
+	}
+
+	// Parse the numeric value
+	var numValue float64
+	if isCPU {
+		// CPU values like "100m", "1", "2500m"
+		if strings.HasSuffix(value, "m") {
+			// Millicores
+			numStr := strings.TrimSuffix(value, "m")
+			if val, err := strconv.ParseFloat(numStr, 64); err == nil {
+				numValue = val / 1000.0 // Convert to cores
+			}
+		} else {
+			// Cores
+			if val, err := strconv.ParseFloat(value, 64); err == nil {
+				numValue = val
+			}
+		}
+
+		// Color based on CPU usage (in cores)
+		if numValue < 0.1 {
+			style = style.Foreground(lipgloss.Color("2")) // Green for low
+		} else if numValue < 0.5 {
+			style = style.Foreground(lipgloss.Color("3")) // Yellow for medium
+		} else {
+			style = style.Foreground(lipgloss.Color("1")) // Red for high
+		}
+	} else {
+		// Memory values like "128Mi", "1Gi", "512Ki"
+		var multiplier float64 = 1
+		cleanValue := value
+
+		if strings.HasSuffix(value, "Gi") {
+			multiplier = 1024
+			cleanValue = strings.TrimSuffix(value, "Gi")
+		} else if strings.HasSuffix(value, "Mi") {
+			multiplier = 1
+			cleanValue = strings.TrimSuffix(value, "Mi")
+		} else if strings.HasSuffix(value, "Ki") {
+			multiplier = 1.0 / 1024.0
+			cleanValue = strings.TrimSuffix(value, "Ki")
+		}
+
+		if val, err := strconv.ParseFloat(cleanValue, 64); err == nil {
+			numValue = val * multiplier // Convert to Mi
+		}
+
+		// Color based on memory usage (in Mi)
+		if numValue < 128 {
+			style = style.Foreground(lipgloss.Color("2")) // Green for low
+		} else if numValue < 512 {
+			style = style.Foreground(lipgloss.Color("3")) // Yellow for medium
+		} else {
+			style = style.Foreground(lipgloss.Color("1")) // Red for high
+		}
+	}
+
+	return style.Render(value)
+}
+
+// styleRestartsCell applies color based on restart count
+func (v *ResourceView) styleRestartsCell(value string, width int, isSelected bool) string {
+	style := lipgloss.NewStyle().Width(width).Align(lipgloss.Right)
+
+	// Apply selection background
+	if isSelected {
+		style = style.Background(lipgloss.Color("57")).Foreground(lipgloss.Color("229"))
+		return style.Render(value)
+	}
+
+	// Extract number from format like "5 (2m ago)"
+	numStr := strings.Split(value, " ")[0]
+	restarts, err := strconv.Atoi(numStr)
+
+	if err == nil {
+		if restarts == 0 {
+			style = style.Foreground(lipgloss.Color("241")) // Gray for zero
+		} else if restarts < 5 {
+			style = style.Foreground(lipgloss.Color("3")) // Yellow for low
+		} else {
+			style = style.Foreground(lipgloss.Color("1")) // Red for high
+		}
+	}
+
+	return style.Render(value)
+}
+
+// restoreSelection intelligently restores the selection after updating rows
+func (v *ResourceView) restoreSelection(newSelectedRow, previousSelectedRow int) {
+	if newSelectedRow >= 0 {
+		// Found the same resource, select it
+		v.selectedRow = newSelectedRow
+	} else if previousSelectedRow < len(v.rows) {
+		// Keep the same position if possible
+		v.selectedRow = previousSelectedRow
+	} else if len(v.rows) > 0 {
+		// Select the last item if previous position is out of bounds
+		v.selectedRow = len(v.rows) - 1
+	} else {
+		// No items left
+		v.selectedRow = 0
+		v.viewportStart = 0
+		return
+	}
+
+	// Ensure viewport is within bounds first
+	if v.viewportStart >= len(v.rows) {
+		v.viewportStart = 0
+		if len(v.rows) > v.viewportHeight {
+			v.viewportStart = len(v.rows) - v.viewportHeight
+		}
+	}
+	if v.viewportStart < 0 {
+		v.viewportStart = 0
+	}
+
+	// Adjust viewport to keep selection visible
+	if v.selectedRow >= v.viewportStart+v.viewportHeight {
+		v.viewportStart = v.selectedRow - v.viewportHeight + 1
+		if v.viewportStart < 0 {
+			v.viewportStart = 0
+		}
+	} else if v.selectedRow < v.viewportStart {
+		v.viewportStart = v.selectedRow
+	}
+}
+
+// calculateColumnWidths calculates the width for each column based on content
+func (v *ResourceView) calculateColumnWidths() {
+	if len(v.headers) == 0 {
+		return
+	}
+
+	// Initialize with header widths
+	v.columnWidths = make([]int, len(v.headers))
+	for i, header := range v.headers {
+		v.columnWidths[i] = len(header) + 2
+	}
+
+	// Check all rows for max width
+	for _, row := range v.rows {
+		for i, cell := range row {
+			if i < len(v.columnWidths) {
+				cellLen := len(cell) + 2
+				if cellLen > v.columnWidths[i] {
+					v.columnWidths[i] = cellLen
+				}
+			}
+		}
+	}
+
+	// Apply limits based on word wrap setting
+	for i := range v.columnWidths {
+		if v.columnWidths[i] < 7 {
+			v.columnWidths[i] = 7
+		}
+		// If word wrap is enabled, limit column width to prevent overly wide columns
+		if v.wordWrap && v.columnWidths[i] > 50 {
+			v.columnWidths[i] = 50
+		}
+		// When word wrap is off, no maximum limit - show full content
+	}
+}
+
+func (v *ResourceView) renderHeader() string {
+	title := fmt.Sprintf("KubeWatch TUI - %s", v.state.CurrentResourceType)
+	namespace := fmt.Sprintf("Namespace: %s", v.state.CurrentNamespace)
+	count := fmt.Sprintf("Count: %d", v.state.GetCurrentResourceCount())
+
+	// Add context information
+	var contextInfo string
+	if v.isMultiContext && len(v.state.CurrentContexts) > 0 {
+		contexts := strings.Join(v.state.CurrentContexts, ", ")
+		if len(contexts) > 30 {
+			contextInfo = fmt.Sprintf("Contexts: %d active", len(v.state.CurrentContexts))
+		} else {
+			contextInfo = fmt.Sprintf("Contexts: %s", contexts)
+		}
+	} else if v.state.CurrentContext != "" {
+		contextInfo = fmt.Sprintf("Context: %s", v.state.CurrentContext)
+	} else {
+		contextInfo = "Context: default"
+	}
+
+	// Add word wrap indicator
+	wrapStatus := "Wrap: OFF"
+	if v.wordWrap {
+		wrapStatus = "Wrap: ON"
+	}
+
+	// Add sort indicator
+	sortDirection := "↑"
+	if !v.state.SortAscending {
+		sortDirection = "↓"
+	}
+	sortStatus := fmt.Sprintf("Sort: %s %s", v.state.SortColumn, sortDirection)
+
+	// Add last refresh time
+	refreshStatus := "Never"
+	if !v.lastRefresh.IsZero() {
+		elapsed := time.Since(v.lastRefresh)
+		if elapsed < time.Minute {
+			refreshStatus = fmt.Sprintf("%ds ago", int(elapsed.Seconds()))
+		} else {
+			refreshStatus = fmt.Sprintf("%dm ago", int(elapsed.Minutes()))
+		}
+	}
+
+	titleStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("86"))
+	infoStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
+	contextStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("5")) // Magenta for context
+	wrapStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("3"))    // Yellow for wrap status
+	sortStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("4"))    // Blue for sort status
+	refreshStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("2")) // Green for refresh
+
+	header := lipgloss.JoinHorizontal(
+		lipgloss.Top,
+		titleStyle.Render(title),
+		strings.Repeat(" ", 10),
+		contextStyle.Render(contextInfo),
+		strings.Repeat(" ", 5),
+		infoStyle.Render(namespace),
+		strings.Repeat(" ", 5),
+		infoStyle.Render(count),
+		strings.Repeat(" ", 5),
+		sortStyle.Render(sortStatus),
+		strings.Repeat(" ", 5),
+		wrapStyle.Render(wrapStatus),
+		strings.Repeat(" ", 5),
+		refreshStyle.Render("↻ "+refreshStatus),
+	)
+
+	return header + "\n"
+}
+
+// updateColumnsForResourceType sets the appropriate columns for the current resource type
+func (v *ResourceView) updateColumnsForResourceType() {
+	// Check if we're viewing all namespaces or a specific one
+	showNamespace := v.state.CurrentNamespace == "" || v.state.CurrentNamespace == "all"
+
+	// Start with context column if in multi-context mode
+	var baseHeaders []string
+	if v.isMultiContext && v.showContextColumn {
+		baseHeaders = []string{"CONTEXT", "NAME"}
+	} else {
+		baseHeaders = []string{"NAME"}
+	}
+
+	switch v.state.CurrentResourceType {
+	case core.ResourceTypePod:
+		v.headers = baseHeaders
+		if showNamespace {
+			v.headers = append(v.headers, "NAMESPACE")
+		}
+		v.headers = append(v.headers, "READY", "STATUS", "RESTARTS", "AGE", "CPU", "MEMORY", "IP", "NODE")
+
+	case core.ResourceTypeDeployment:
+		v.headers = baseHeaders
+		if showNamespace {
+			v.headers = append(v.headers, "NAMESPACE")
+		}
+		v.headers = append(v.headers, "READY", "UP-TO-DATE", "AVAILABLE", "AGE", "CONTAINERS", "IMAGES", "SELECTOR")
+
+	case core.ResourceTypeStatefulSet:
+		v.headers = baseHeaders
+		if showNamespace {
+			v.headers = append(v.headers, "NAMESPACE")
+		}
+		v.headers = append(v.headers, "READY", "AGE", "CONTAINERS", "IMAGES")
+
+	case core.ResourceTypeService:
+		v.headers = baseHeaders
+		if showNamespace {
+			v.headers = append(v.headers, "NAMESPACE")
+		}
+		v.headers = append(v.headers, "TYPE", "CLUSTER-IP", "EXTERNAL-IP", "PORT(S)", "AGE")
+
+	case core.ResourceTypeIngress:
+		v.headers = baseHeaders
+		if showNamespace {
+			v.headers = append(v.headers, "NAMESPACE")
+		}
+		v.headers = append(v.headers, "CLASS", "HOSTS", "ADDRESS", "PORTS", "AGE")
+
+	case core.ResourceTypeConfigMap:
+		v.headers = baseHeaders
+		if showNamespace {
+			v.headers = append(v.headers, "NAMESPACE")
+		}
+		v.headers = append(v.headers, "DATA", "AGE")
+
+	case core.ResourceTypeSecret:
+		v.headers = baseHeaders
+		if showNamespace {
+			v.headers = append(v.headers, "NAMESPACE")
+		}
+		v.headers = append(v.headers, "TYPE", "DATA", "AGE")
+	}
+}
+
+func (v *ResourceView) updateTableWithPods(pods []v1.Pod) {
+	// Update columns for pods
+	v.updateColumnsForResourceType()
+
+	showNamespace := v.state.CurrentNamespace == "" || v.state.CurrentNamespace == "all"
+
+	// Save the currently selected resource identity
+	v.saveSelectedIdentity()
+
+	// Preserve the currently selected resource name and position (for fallback)
+	var selectedResourceName string
+	previousSelectedRow := v.selectedRow
+	if v.selectedRow >= 0 && v.selectedRow < len(v.rows) && len(v.rows) > 0 {
+		selectedResourceName = v.rows[v.selectedRow][0] // First column is always NAME
+	}
+
+	// Clear and rebuild rows and resource map
+	v.rows = [][]string{}
+	v.resourceMap = make(map[int]*ResourceIdentity)
+	newSelectedRow := -1 // Will update this if we find the previously selected resource
+
+	for _, pod := range pods {
+		// Calculate ready containers
+		readyContainers := 0
+		totalContainers := len(pod.Status.ContainerStatuses)
+		restartCount := int32(0)
+		var lastRestartTime *time.Time
+
+		for _, cs := range pod.Status.ContainerStatuses {
+			if cs.Ready {
+				readyContainers++
+			}
+			restartCount += cs.RestartCount
+			if cs.LastTerminationState.Terminated != nil {
+				t := cs.LastTerminationState.Terminated.FinishedAt.Time
+				if lastRestartTime == nil || t.After(*lastRestartTime) {
+					lastRestartTime = &t
+				}
+			}
+		}
+
+		ready := fmt.Sprintf("%d/%d", readyContainers, totalContainers)
+		status := string(pod.Status.Phase)
+
+		// Get more detailed status if available
+		for _, condition := range pod.Status.Conditions {
+			if condition.Type == v1.PodReady && condition.Status != v1.ConditionTrue {
+				if condition.Reason != "" {
+					status = condition.Reason
+				}
+			}
+		}
+
+		// Check container statuses for more specific states
+		for _, cs := range pod.Status.ContainerStatuses {
+			if cs.State.Waiting != nil && cs.State.Waiting.Reason != "" {
+				status = cs.State.Waiting.Reason
+				break
+			}
+			if cs.State.Terminated != nil && cs.State.Terminated.Reason != "" {
+				status = cs.State.Terminated.Reason
+				break
+			}
+		}
+
+		// Format restart count with time if available
+		restartStr := fmt.Sprintf("%d", restartCount)
+		if restartCount > 0 && lastRestartTime != nil {
+			restartAge := getAge(*lastRestartTime)
+			restartStr = fmt.Sprintf("%d (%s ago)", restartCount, restartAge)
+		}
+
+		age := getAge(pod.CreationTimestamp.Time)
+
+		// Get metrics if available
+		cpu := "-"
+		memory := "-"
+		if v.podMetrics != nil {
+			if metrics, ok := v.podMetrics[pod.Name]; ok {
+				cpu = metrics.CPU
+				memory = metrics.Memory
+			}
+		}
+
+		// Get IP and Node
+		ip := pod.Status.PodIP
+		if ip == "" {
+			ip = "-"
+		}
+		node := pod.Spec.NodeName
+		if node == "" {
+			node = "-"
+		}
+
+		// Build row data
+		rowData := []string{pod.Name}
+		if showNamespace {
+			rowData = append(rowData, pod.Namespace)
+		}
+		rowData = append(rowData, ready, status, restartStr, age, cpu, memory, ip, node)
+		v.rows = append(v.rows, rowData)
+
+		// Create resource identity for this row
+		rowIndex := len(v.rows) - 1
+		identity := &ResourceIdentity{
+			Context:   "", // Single context mode
+			Namespace: pod.Namespace,
+			Name:      pod.Name,
+			UID:       string(pod.UID),
+			Kind:      "Pod",
+		}
+		v.resourceMap[rowIndex] = identity
+
+		// Check if this was the previously selected resource
+		if selectedResourceName != "" && pod.Name == selectedResourceName {
+			newSelectedRow = len(v.rows) - 1
+		}
+	}
+
+	// Restore selection intelligently
+	// Try to restore selection by identity first, then fall back to old method
+	v.restoreSelectionByIdentity()
+
+	// If identity-based restoration didn't work, use the old method as fallback
+	if v.selectedIdentity != nil && v.findResourceByIdentity(v.selectedIdentity) < 0 {
+		v.restoreSelection(newSelectedRow, previousSelectedRow)
+	}
+
+	// Adjust viewport to keep selection visible
+	if v.selectedRow >= v.viewportStart+v.viewportHeight {
+		v.viewportStart = v.selectedRow - v.viewportHeight + 1
+	} else if v.selectedRow < v.viewportStart {
+		v.viewportStart = v.selectedRow
+	}
+
+	// Sort the rows
+	v.sortRows()
+
+	// Sort the rows
+	v.sortRows()
+
+	// Calculate column widths
+	v.calculateColumnWidths()
+}
+
+func (v *ResourceView) updateTableWithDeployments(deployments []appsv1.Deployment) {
+	// Update columns for deployments
+	v.updateColumnsForResourceType()
+
+	showNamespace := v.state.CurrentNamespace == "" || v.state.CurrentNamespace == "all"
+
+	// Preserve the currently selected resource name
+	var selectedResourceName string
+	if v.selectedRow >= 0 && v.selectedRow < len(v.rows) && len(v.rows) > 0 {
+		selectedResourceName = v.rows[v.selectedRow][0] // First column is always NAME
+	}
+
+	// Clear and rebuild rows
+	v.rows = [][]string{}
+	newSelectedRow := 0 // Will update this if we find the previously selected resource
+
+	for _, dep := range deployments {
+		replicas := int32(0)
+		if dep.Spec.Replicas != nil {
+			replicas = *dep.Spec.Replicas
+		}
+		ready := fmt.Sprintf("%d/%d", dep.Status.ReadyReplicas, replicas)
+		upToDate := fmt.Sprintf("%d", dep.Status.UpdatedReplicas)
+		available := fmt.Sprintf("%d", dep.Status.AvailableReplicas)
+		age := getAge(dep.CreationTimestamp.Time)
+
+		// Get containers and images
+		var containers []string
+		var images []string
+		for _, container := range dep.Spec.Template.Spec.Containers {
+			containers = append(containers, container.Name)
+			images = append(images, container.Image)
+		}
+		containersStr := strings.Join(containers, ",")
+		imagesStr := strings.Join(images, ",")
+
+		// Get selector
+		var selectors []string
+		for k, v := range dep.Spec.Selector.MatchLabels {
+			selectors = append(selectors, fmt.Sprintf("%s=%s", k, v))
+		}
+		selectorStr := strings.Join(selectors, ",")
+
+		// Build row data
+		rowData := []string{dep.Name}
+		if showNamespace {
+			rowData = append(rowData, dep.Namespace)
+		}
+		rowData = append(rowData, ready, upToDate, available, age, containersStr, imagesStr, selectorStr)
+		v.rows = append(v.rows, rowData)
+
+		// Check if this was the previously selected resource
+		if selectedResourceName != "" && dep.Name == selectedResourceName {
+			newSelectedRow = len(v.rows) - 1
+		}
+	}
+
+	// Restore selection
+	v.selectedRow = newSelectedRow
+
+	// Adjust viewport to keep selection visible
+	if v.selectedRow >= v.viewportStart+v.viewportHeight {
+		v.viewportStart = v.selectedRow - v.viewportHeight + 1
+	} else if v.selectedRow < v.viewportStart {
+		v.viewportStart = v.selectedRow
+	}
+
+	// Sort the rows
+	v.sortRows()
+
+	// Calculate column widths
+	v.calculateColumnWidths()
+}
+
+func (v *ResourceView) updateTableWithStatefulSets(statefulsets []appsv1.StatefulSet) {
+	// Update columns for statefulsets
+	v.updateColumnsForResourceType()
+
+	showNamespace := v.state.CurrentNamespace == "" || v.state.CurrentNamespace == "all"
+
+	// Preserve the currently selected resource name
+	var selectedResourceName string
+	if v.selectedRow >= 0 && v.selectedRow < len(v.rows) && len(v.rows) > 0 {
+		selectedResourceName = v.rows[v.selectedRow][0] // First column is always NAME
+	}
+
+	// Clear and rebuild rows
+	v.rows = [][]string{}
+	newSelectedRow := 0 // Will update this if we find the previously selected resource
+
+	for _, sts := range statefulsets {
+		replicas := int32(0)
+		if sts.Spec.Replicas != nil {
+			replicas = *sts.Spec.Replicas
+		}
+		ready := fmt.Sprintf("%d/%d", sts.Status.ReadyReplicas, replicas)
+		age := getAge(sts.CreationTimestamp.Time)
+
+		// Get containers and images
+		var containers []string
+		var images []string
+		for _, container := range sts.Spec.Template.Spec.Containers {
+			containers = append(containers, container.Name)
+			images = append(images, container.Image)
+		}
+		containersStr := strings.Join(containers, ",")
+		imagesStr := strings.Join(images, ",")
+
+		// Build row data
+		rowData := []string{sts.Name}
+		if showNamespace {
+			rowData = append(rowData, sts.Namespace)
+		}
+		rowData = append(rowData, ready, age, containersStr, imagesStr)
+		v.rows = append(v.rows, rowData)
+
+		// Check if this was the previously selected resource
+		if selectedResourceName != "" && sts.Name == selectedResourceName {
+			newSelectedRow = len(v.rows) - 1
+		}
+	}
+
+	// Restore selection
+	v.selectedRow = newSelectedRow
+
+	// Adjust viewport to keep selection visible
+	if v.selectedRow >= v.viewportStart+v.viewportHeight {
+		v.viewportStart = v.selectedRow - v.viewportHeight + 1
+	} else if v.selectedRow < v.viewportStart {
+		v.viewportStart = v.selectedRow
+	}
+
+	// Sort the rows
+	v.sortRows()
+
+	// Calculate column widths
+	v.calculateColumnWidths()
+}
+
+func (v *ResourceView) updateTableWithServices(services []v1.Service) {
+	// Update columns for services
+	v.updateColumnsForResourceType()
+
+	showNamespace := v.state.CurrentNamespace == "" || v.state.CurrentNamespace == "all"
+
+	// Preserve the currently selected resource name
+	var selectedResourceName string
+	if v.selectedRow >= 0 && v.selectedRow < len(v.rows) && len(v.rows) > 0 {
+		selectedResourceName = v.rows[v.selectedRow][0] // First column is always NAME
+	}
+
+	// Clear and rebuild rows
+	v.rows = [][]string{}
+	newSelectedRow := 0 // Will update this if we find the previously selected resource
+
+	for _, svc := range services {
+		svcType := string(svc.Spec.Type)
+		clusterIP := svc.Spec.ClusterIP
+		if clusterIP == "" {
+			clusterIP = "None"
+		}
+
+		// Get external IPs
+		externalIP := "<none>"
+		if len(svc.Spec.ExternalIPs) > 0 {
+			externalIP = strings.Join(svc.Spec.ExternalIPs, ",")
+		} else if svc.Spec.Type == v1.ServiceTypeLoadBalancer && len(svc.Status.LoadBalancer.Ingress) > 0 {
+			var ips []string
+			for _, ingress := range svc.Status.LoadBalancer.Ingress {
+				if ingress.IP != "" {
+					ips = append(ips, ingress.IP)
+				} else if ingress.Hostname != "" {
+					ips = append(ips, ingress.Hostname)
+				}
+			}
+			if len(ips) > 0 {
+				externalIP = strings.Join(ips, ",")
+			}
+		}
+
+		// Get ports
+		var ports []string
+		for _, port := range svc.Spec.Ports {
+			portStr := fmt.Sprintf("%d", port.Port)
+			if port.NodePort != 0 {
+				portStr = fmt.Sprintf("%d:%d", port.Port, port.NodePort)
+			}
+			if port.Protocol != "" && port.Protocol != "TCP" {
+				portStr = fmt.Sprintf("%s/%s", portStr, port.Protocol)
+			}
+			if port.Name != "" {
+				portStr = fmt.Sprintf("%s(%s)", portStr, port.Name)
+			}
+			ports = append(ports, portStr)
+		}
+		portStr := "<none>"
+		if len(ports) > 0 {
+			portStr = strings.Join(ports, ",")
+			// Don't truncate - show full port information
+		}
+
+		age := getAge(svc.CreationTimestamp.Time)
+
+		// Build row data
+		rowData := []string{svc.Name}
+		if showNamespace {
+			rowData = append(rowData, svc.Namespace)
+		}
+		rowData = append(rowData, svcType, clusterIP, externalIP, portStr, age)
+		v.rows = append(v.rows, rowData)
+
+		// Check if this was the previously selected resource
+		if selectedResourceName != "" && svc.Name == selectedResourceName {
+			newSelectedRow = len(v.rows) - 1
+		}
+	}
+
+	// Restore selection
+	v.selectedRow = newSelectedRow
+
+	// Adjust viewport to keep selection visible
+	if v.selectedRow >= v.viewportStart+v.viewportHeight {
+		v.viewportStart = v.selectedRow - v.viewportHeight + 1
+	} else if v.selectedRow < v.viewportStart {
+		v.viewportStart = v.selectedRow
+	}
+
+	// Sort the rows
+	v.sortRows()
+
+	// Calculate column widths
+	v.calculateColumnWidths()
+}
+
+func (v *ResourceView) updateTableWithIngresses(ingresses []networkingv1.Ingress) {
+	// Update columns for ingresses
+	v.updateColumnsForResourceType()
+
+	showNamespace := v.state.CurrentNamespace == "" || v.state.CurrentNamespace == "all"
+
+	// Preserve the currently selected resource name
+	var selectedResourceName string
+	previousSelectedRow := v.selectedRow
+	if v.selectedRow >= 0 && v.selectedRow < len(v.rows) && len(v.rows) > 0 {
+		selectedResourceName = v.rows[v.selectedRow][0] // First column is always NAME
+	}
+
+	// Clear and rebuild rows
+	v.rows = [][]string{}
+	newSelectedRow := -1 // Will update this if we find the previously selected resource
+
+	for _, ing := range ingresses {
+		// Get ingress class
+		className := "<none>"
+		if ing.Spec.IngressClassName != nil {
+			className = *ing.Spec.IngressClassName
+		}
+
+		// Get hosts
+		var hosts []string
+		for _, rule := range ing.Spec.Rules {
+			if rule.Host != "" {
+				hosts = append(hosts, rule.Host)
+			}
+		}
+		hostsStr := "<none>"
+		if len(hosts) > 0 {
+			hostsStr = strings.Join(hosts, ",")
+		}
+
+		// Get addresses
+		var addresses []string
+		for _, ingStatus := range ing.Status.LoadBalancer.Ingress {
+			if ingStatus.IP != "" {
+				addresses = append(addresses, ingStatus.IP)
+			} else if ingStatus.Hostname != "" {
+				addresses = append(addresses, ingStatus.Hostname)
+			}
+		}
+		addressStr := "<none>"
+		if len(addresses) > 0 {
+			addressStr = strings.Join(addresses, ",")
+		}
+
+		// Get ports
+		ports := "80"
+		if len(ing.Spec.TLS) > 0 {
+			ports = "80, 443"
+		}
+
+		age := getAge(ing.CreationTimestamp.Time)
+
+		// Build row data
+		rowData := []string{ing.Name}
+		if showNamespace {
+			rowData = append(rowData, ing.Namespace)
+		}
+		rowData = append(rowData, className, hostsStr, addressStr, ports, age)
+		v.rows = append(v.rows, rowData)
+
+		// Check if this was the previously selected resource
+		if selectedResourceName != "" && ing.Name == selectedResourceName {
+			newSelectedRow = len(v.rows) - 1
+		}
+	}
+
+	// Restore selection intelligently
+	v.restoreSelection(newSelectedRow, previousSelectedRow)
+
+	// Sort the rows
+	v.sortRows()
+
+	// Calculate column widths
+	v.calculateColumnWidths()
+}
+
+func (v *ResourceView) updateTableWithConfigMaps(configmaps []v1.ConfigMap) {
+	// Update columns for configmaps
+	v.updateColumnsForResourceType()
+
+	showNamespace := v.state.CurrentNamespace == "" || v.state.CurrentNamespace == "all"
+
+	// Preserve the currently selected resource name
+	var selectedResourceName string
+	if v.selectedRow >= 0 && v.selectedRow < len(v.rows) && len(v.rows) > 0 {
+		selectedResourceName = v.rows[v.selectedRow][0] // First column is always NAME
+	}
+
+	// Clear and rebuild rows
+	v.rows = [][]string{}
+	newSelectedRow := 0 // Will update this if we find the previously selected resource
+
+	for _, cm := range configmaps {
+		dataCount := fmt.Sprintf("%d", len(cm.Data)+len(cm.BinaryData))
+		age := getAge(cm.CreationTimestamp.Time)
+
+		// Build row data
+		rowData := []string{cm.Name}
+		if showNamespace {
+			rowData = append(rowData, cm.Namespace)
+		}
+		rowData = append(rowData, dataCount, age)
+		v.rows = append(v.rows, rowData)
+
+		// Check if this was the previously selected resource
+		if selectedResourceName != "" && cm.Name == selectedResourceName {
+			newSelectedRow = len(v.rows) - 1
+		}
+	}
+
+	// Restore selection
+	v.selectedRow = newSelectedRow
+
+	// Adjust viewport to keep selection visible
+	if v.selectedRow >= v.viewportStart+v.viewportHeight {
+		v.viewportStart = v.selectedRow - v.viewportHeight + 1
+	} else if v.selectedRow < v.viewportStart {
+		v.viewportStart = v.selectedRow
+	}
+
+	// Sort the rows
+	v.sortRows()
+
+	// Calculate column widths
+	v.calculateColumnWidths()
+}
+
+func (v *ResourceView) updateTableWithSecrets(secrets []v1.Secret) {
+	// Update columns for secrets
+	v.updateColumnsForResourceType()
+
+	showNamespace := v.state.CurrentNamespace == "" || v.state.CurrentNamespace == "all"
+
+	// Preserve the currently selected resource name
+	var selectedResourceName string
+	if v.selectedRow >= 0 && v.selectedRow < len(v.rows) && len(v.rows) > 0 {
+		selectedResourceName = v.rows[v.selectedRow][0] // First column is always NAME
+	}
+
+	// Clear and rebuild rows
+	v.rows = [][]string{}
+	newSelectedRow := 0 // Will update this if we find the previously selected resource
+
+	for _, secret := range secrets {
+		secretType := string(secret.Type)
+		dataCount := fmt.Sprintf("%d", len(secret.Data))
+		age := getAge(secret.CreationTimestamp.Time)
+
+		// Build row data
+		rowData := []string{secret.Name}
+		if showNamespace {
+			rowData = append(rowData, secret.Namespace)
+		}
+		rowData = append(rowData, secretType, dataCount, age)
+		v.rows = append(v.rows, rowData)
+
+		// Check if this was the previously selected resource
+		if selectedResourceName != "" && secret.Name == selectedResourceName {
+			newSelectedRow = len(v.rows) - 1
+		}
+	}
+
+	// Restore selection
+	v.selectedRow = newSelectedRow
+
+	// Adjust viewport to keep selection visible
+	if v.selectedRow >= v.viewportStart+v.viewportHeight {
+		v.viewportStart = v.selectedRow - v.viewportHeight + 1
+	} else if v.selectedRow < v.viewportStart {
+		v.viewportStart = v.selectedRow
+	}
+
+	// Sort the rows
+	v.sortRows()
+
+	// Calculate column widths
+	v.calculateColumnWidths()
+}
+
+// sortRows sorts the table rows based on the current sort configuration
+func (v *ResourceView) sortRows() {
+	if len(v.rows) <= 1 {
+		return
+	}
+
+	// Determine which column to sort by
+	sortColumn := v.state.SortColumn
+	if sortColumn == "" {
+		sortColumn = "NAME" // Default sort by name
+	}
+
+	// Find the column index
+	sortColumnIndex := -1
+	for i, header := range v.headers {
+		if header == sortColumn {
+			sortColumnIndex = i
+			break
+		}
+	}
+
+	// If column not found, sort by first column (NAME)
+	if sortColumnIndex == -1 {
+		sortColumnIndex = 0
+	}
+
+	// Sort the rows
+	sort.Slice(v.rows, func(i, j int) bool {
+		if sortColumnIndex >= len(v.rows[i]) || sortColumnIndex >= len(v.rows[j]) {
+			return false
+		}
+
+		valueI := v.rows[i][sortColumnIndex]
+		valueJ := v.rows[j][sortColumnIndex]
+
+		// Handle numeric columns specially
+		if sortColumn == "READY" || sortColumn == "RESTARTS" || sortColumn == "AGE" {
+			return v.compareNumericValues(valueI, valueJ, v.state.SortAscending)
+		}
+
+		// String comparison
+		if v.state.SortAscending {
+			return strings.ToLower(valueI) < strings.ToLower(valueJ)
+		}
+		return strings.ToLower(valueI) > strings.ToLower(valueJ)
+	})
+}
+
+// compareNumericValues compares two values that might be numeric
+func (v *ResourceView) compareNumericValues(valueI, valueJ string, ascending bool) bool {
+	// Try to extract numeric values for comparison
+	numI := v.extractNumericValue(valueI)
+	numJ := v.extractNumericValue(valueJ)
+
+	if ascending {
+		return numI < numJ
+	}
+	return numI > numJ
+}
+
+// extractNumericValue extracts a numeric value from a string for sorting
+func (v *ResourceView) extractNumericValue(value string) float64 {
+	// Handle ready format "1/2"
+	if strings.Contains(value, "/") {
+		parts := strings.Split(value, "/")
+		if len(parts) == 2 {
+			ready, err1 := strconv.ParseFloat(parts[0], 64)
+			total, err2 := strconv.ParseFloat(parts[1], 64)
+			if err1 == nil && err2 == nil && total > 0 {
+				return ready / total // Return percentage
+			}
+		}
+	}
+
+	// Handle restart count with time "5 (2m ago)"
+	if strings.Contains(value, " (") {
+		parts := strings.Split(value, " (")
+		if len(parts) > 0 {
+			if num, err := strconv.ParseFloat(parts[0], 64); err == nil {
+				return num
+			}
+		}
+	}
+
+	// Handle age format
+	if strings.HasSuffix(value, "s") || strings.HasSuffix(value, "m") ||
+		strings.HasSuffix(value, "h") || strings.HasSuffix(value, "d") ||
+		strings.HasSuffix(value, "mo") || strings.HasSuffix(value, "y") {
+		return v.parseAgeToSeconds(value)
+	}
+
+	// Try direct numeric conversion
+	if num, err := strconv.ParseFloat(value, 64); err == nil {
+		return num
+	}
+
+	// Default to 0 for non-numeric values
+	return 0
+}
+
+// parseAgeToSeconds converts age string to seconds for sorting
+func (v *ResourceView) parseAgeToSeconds(age string) float64 {
+	if len(age) < 2 {
+		return 0
+	}
+
+	valueStr := age[:len(age)-1]
+	unit := age[len(age)-1:]
+
+	// Handle "mo" and "y" units
+	if len(age) >= 3 && age[len(age)-2:] == "mo" {
+		valueStr = age[:len(age)-2]
+		unit = "mo"
+	} else if len(age) >= 2 && age[len(age)-1:] == "y" {
+		unit = "y"
+	}
+
+	value, err := strconv.ParseFloat(valueStr, 64)
+	if err != nil {
+		return 0
+	}
+
+	switch unit {
+	case "s":
+		return value
+	case "m":
+		return value * 60
+	case "h":
+		return value * 3600
+	case "d":
+		return value * 86400
+	case "mo":
+		return value * 2592000 // 30 days
+	case "y":
+		return value * 31536000 // 365 days
+	default:
+		return value
+	}
+}
+
+// Multi-context table update methods
+
+func (v *ResourceView) updateTableWithPodsMultiContext(podsWithContext []k8s.PodWithContext) {
+	// Update columns for pods with context column
+	v.updateColumnsForResourceType()
+
+	showNamespace := v.state.CurrentNamespace == "" || v.state.CurrentNamespace == "all"
+
+	// Save the currently selected resource identity
+	v.saveSelectedIdentity()
+
+	// Preserve the currently selected resource name and position (for fallback)
+	var selectedResourceName string
+	previousSelectedRow := v.selectedRow
+	if v.selectedRow >= 0 && v.selectedRow < len(v.rows) && len(v.rows) > 0 {
+		// In multi-context mode, first column is CONTEXT, second is NAME
+		if len(v.rows[v.selectedRow]) > 1 {
+			selectedResourceName = v.rows[v.selectedRow][1]
+		}
+	}
+
+	// Clear and rebuild rows and resource map
+	v.rows = [][]string{}
+	v.resourceMap = make(map[int]*ResourceIdentity)
+	newSelectedRow := -1
+
+	for _, pwc := range podsWithContext {
+		pod := pwc.Pod
+		context := pwc.Context
+
+		// Calculate ready containers
+		readyContainers := 0
+		totalContainers := len(pod.Status.ContainerStatuses)
+		restartCount := int32(0)
+		var lastRestartTime *time.Time
+
+		for _, cs := range pod.Status.ContainerStatuses {
+			if cs.Ready {
+				readyContainers++
+			}
+			restartCount += cs.RestartCount
+			if cs.LastTerminationState.Terminated != nil {
+				t := cs.LastTerminationState.Terminated.FinishedAt.Time
+				if lastRestartTime == nil || t.After(*lastRestartTime) {
+					lastRestartTime = &t
+				}
+			}
+		}
+
+		ready := fmt.Sprintf("%d/%d", readyContainers, totalContainers)
+		status := string(pod.Status.Phase)
+
+		// Get more detailed status if available
+		for _, condition := range pod.Status.Conditions {
+			if condition.Type == v1.PodReady && condition.Status != v1.ConditionTrue {
+				if condition.Reason != "" {
+					status = condition.Reason
+				}
+			}
+		}
+
+		// Check container statuses for more specific states
+		for _, cs := range pod.Status.ContainerStatuses {
+			if cs.State.Waiting != nil && cs.State.Waiting.Reason != "" {
+				status = cs.State.Waiting.Reason
+				break
+			}
+			if cs.State.Terminated != nil && cs.State.Terminated.Reason != "" {
+				status = cs.State.Terminated.Reason
+				break
+			}
+		}
+
+		// Format restart count with time if available
+		restartStr := fmt.Sprintf("%d", restartCount)
+		if restartCount > 0 && lastRestartTime != nil {
+			restartAge := getAge(*lastRestartTime)
+			restartStr = fmt.Sprintf("%d (%s ago)", restartCount, restartAge)
+		}
+
+		age := getAge(pod.CreationTimestamp.Time)
+
+		// Get metrics if available
+		cpu := "-"
+		memory := "-"
+		if v.podMetrics != nil {
+			if metrics, ok := v.podMetrics[pod.Name]; ok {
+				cpu = metrics.CPU
+				memory = metrics.Memory
+			}
+		}
+
+		// Get IP and Node
+		ip := pod.Status.PodIP
+		if ip == "" {
+			ip = "-"
+		}
+		node := pod.Spec.NodeName
+		if node == "" {
+			node = "-"
+		}
+
+		// Build row data with context column first
+		rowData := []string{context, pod.Name}
+		if showNamespace {
+			rowData = append(rowData, pod.Namespace)
+		}
+		rowData = append(rowData, ready, status, restartStr, age, cpu, memory, ip, node)
+		v.rows = append(v.rows, rowData)
+
+		// Create resource identity for this row
+		rowIndex := len(v.rows) - 1
+		identity := &ResourceIdentity{
+			Context:   context,
+			Namespace: pod.Namespace,
+			Name:      pod.Name,
+			UID:       string(pod.UID),
+			Kind:      "Pod",
+		}
+		v.resourceMap[rowIndex] = identity
+
+		// Check if this was the previously selected resource
+		if selectedResourceName != "" && pod.Name == selectedResourceName {
+			newSelectedRow = len(v.rows) - 1
+		}
+	}
+
+	// Restore selection intelligently
+	v.restoreSelection(newSelectedRow, previousSelectedRow)
+
+	// Adjust viewport to keep selection visible
+	if v.selectedRow >= v.viewportStart+v.viewportHeight {
+		v.viewportStart = v.selectedRow - v.viewportHeight + 1
+	} else if v.selectedRow < v.viewportStart {
+		v.viewportStart = v.selectedRow
+	}
+
+	// Sort the rows
+	v.sortRows()
+
+	// Calculate column widths
+	v.calculateColumnWidths()
+}
+
+func (v *ResourceView) updateTableWithDeploymentsMultiContext(deploymentsWithContext []k8s.DeploymentWithContext) {
+	// Update columns for deployments with context column
+	v.updateColumnsForResourceType()
+
+	showNamespace := v.state.CurrentNamespace == "" || v.state.CurrentNamespace == "all"
+
+	// Preserve the currently selected resource name
+	var selectedResourceName string
+	previousSelectedRow := v.selectedRow
+	if v.selectedRow >= 0 && v.selectedRow < len(v.rows) && len(v.rows) > 0 {
+		selectedResourceName = v.rows[v.selectedRow][0] // First column is always NAME
+	}
+
+	// Clear and rebuild rows
+	v.rows = [][]string{}
+	newSelectedRow := -1
+
+	for _, dwc := range deploymentsWithContext {
+		deployment := dwc.Deployment
+		context := dwc.Context
+
+		ready := fmt.Sprintf("%d/%d", deployment.Status.ReadyReplicas, deployment.Status.Replicas)
+		upToDate := fmt.Sprintf("%d", deployment.Status.UpdatedReplicas)
+		available := fmt.Sprintf("%d", deployment.Status.AvailableReplicas)
+		age := getAge(deployment.CreationTimestamp.Time)
+
+		// Build row data with context column first
+		rowData := []string{context, deployment.Name}
+		if showNamespace {
+			rowData = append(rowData, deployment.Namespace)
+		}
+		rowData = append(rowData, ready, upToDate, available, age)
+		v.rows = append(v.rows, rowData)
+
+		// Check if this was the previously selected resource
+		if selectedResourceName != "" && deployment.Name == selectedResourceName {
+			newSelectedRow = len(v.rows) - 1
+		}
+	}
+
+	// Restore selection intelligently
+	v.restoreSelection(newSelectedRow, previousSelectedRow)
+
+	// Adjust viewport to keep selection visible
+	if v.selectedRow >= v.viewportStart+v.viewportHeight {
+		v.viewportStart = v.selectedRow - v.viewportHeight + 1
+	} else if v.selectedRow < v.viewportStart {
+		v.viewportStart = v.selectedRow
+	}
+
+	// Sort the rows
+	v.sortRows()
+
+	// Calculate column widths
+	v.calculateColumnWidths()
+}
+
+// Helper functions
+
+func getAge(t time.Time) string {
+	duration := time.Since(t)
+	if duration.Hours() > 24*365 {
+		years := int(duration.Hours() / (24 * 365))
+		return fmt.Sprintf("%dy", years)
+	} else if duration.Hours() > 24*30 {
+		months := int(duration.Hours() / (24 * 30))
+		return fmt.Sprintf("%dmo", months)
+	} else if duration.Hours() > 24 {
+		days := int(duration.Hours() / 24)
+		return fmt.Sprintf("%dd", days)
+	} else if duration.Hours() > 1 {
+		return fmt.Sprintf("%dh", int(duration.Hours()))
+	} else if duration.Minutes() > 1 {
+		return fmt.Sprintf("%dm", int(duration.Minutes()))
+	}
+	return fmt.Sprintf("%ds", int(duration.Seconds()))
+}
+
+// Message types
+type refreshCompleteMsg struct{}
+type deleteCompleteMsg struct{ name string }
+type errMsg struct{ err error }

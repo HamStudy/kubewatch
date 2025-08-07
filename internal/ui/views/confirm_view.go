@@ -14,6 +14,7 @@ type ConfirmView struct {
 	confirmText string
 	cancelText  string
 	confirmed   bool
+	completed   bool // Track if the dialog has been completed
 	width       int
 	height      int
 }
@@ -45,9 +46,11 @@ func (v *ConfirmView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			v.confirmed = !v.confirmed
 		case "y", "Y":
 			v.confirmed = true
+			v.completed = true
 			return v, nil
 		case "n", "N":
 			v.confirmed = false
+			v.completed = true
 			return v, nil
 		case "enter", " ":
 			// Action confirmed or cancelled - will be handled by parent
@@ -152,6 +155,11 @@ func (v *ConfirmView) SetSize(width, height int) {
 // IsConfirmed returns whether the user confirmed the action
 func (v *ConfirmView) IsConfirmed() bool {
 	return v.confirmed
+}
+
+// IsCompleted returns whether the dialog has been completed (user made a choice)
+func (v *ConfirmView) IsCompleted() bool {
+	return v.completed
 }
 
 // SetConfirmText sets custom confirm button text

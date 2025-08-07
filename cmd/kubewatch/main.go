@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"flag"
 	"fmt"
@@ -56,6 +57,9 @@ type CLIFlags struct {
 	colorScheme       string
 	resourceType      string // Initial resource type to display
 
+	// Context flags
+	contextFile string // File containing list of contexts
+
 	// Other flags
 	version  bool
 	help     bool
@@ -69,7 +73,7 @@ func parseFlags() *CLIFlags {
 
 	// Define flags similar to kubectl
 	flag.StringVar(&flags.kubeconfig, "kubeconfig", "", "Path to the kubeconfig file to use for CLI requests (can also use KUBECONFIG env var)")
-	flag.StringVar(&flags.context, "context", "", "The name of the kubeconfig context to use")
+	flag.StringVar(&flags.context, "context", "", "Kubernetes context(s) to use. Single: 'prod' or Multiple: 'prod,staging,dev'")
 	flag.StringVar(&flags.namespace, "namespace", "", "If present, the namespace scope for this CLI request")
 	flag.StringVar(&flags.namespace, "n", "", "Shorthand for --namespace")
 	flag.BoolVar(&flags.allNamespaces, "all-namespaces", false, "If present, list the requested object(s) across all namespaces")
@@ -97,6 +101,9 @@ func parseFlags() *CLIFlags {
 	flag.IntVar(&flags.logTailLines, "log-tail-lines", 100, "Number of log lines to tail when viewing logs")
 	flag.IntVar(&flags.maxResourcesShown, "max-resources", 500, "Maximum number of resources to display")
 	flag.StringVar(&flags.colorScheme, "color-scheme", "default", "Color scheme to use (default, dark, light)")
+
+	// Context file flag
+	flag.StringVar(&flags.contextFile, "context-file", "", "File containing list of contexts (one per line)")
 
 	// Other flags
 	flag.BoolVar(&flags.version, "version", false, "Print version information and quit")
@@ -127,6 +134,8 @@ func parseFlags() *CLIFlags {
 		fmt.Fprintf(os.Stderr, "  kubewatch deployments\n\n")
 		fmt.Fprintf(os.Stderr, "  # Use specific context and namespace\n")
 		fmt.Fprintf(os.Stderr, "  kubewatch --context=production --namespace=web\n\n")
+		fmt.Fprintf(os.Stderr, "  # Use multiple contexts (multi-context mode)\n")
+		fmt.Fprintf(os.Stderr, "  kubewatch --context=prod,staging,dev\n\n")
 		fmt.Fprintf(os.Stderr, "  # Use custom kubeconfig file\n")
 		fmt.Fprintf(os.Stderr, "  kubewatch --kubeconfig=/path/to/config\n\n")
 		fmt.Fprintf(os.Stderr, "  # Watch deployments in prod namespace\n")
@@ -139,9 +148,11 @@ func parseFlags() *CLIFlags {
 		fmt.Fprintf(os.Stderr, "  Tab        - Switch between resource types\n")
 		fmt.Fprintf(os.Stderr, "  j/k        - Navigate up/down\n")
 		fmt.Fprintf(os.Stderr, "  g/G        - Go to top/bottom\n")
-		fmt.Fprintf(os.Stderr, "  d          - Delete selected resource\n")
+		fmt.Fprintf(os.Stderr, "  Del/D      - Delete selected resource\n")
 		fmt.Fprintf(os.Stderr, "  l          - View logs (pods only)\n")
 		fmt.Fprintf(os.Stderr, "  n          - Change namespace\n")
+		fmt.Fprintf(os.Stderr, "  c          - Switch contexts (multi-context mode)\n")
+		fmt.Fprintf(os.Stderr, "  s          - Cycle sort column/direction\n")
 		fmt.Fprintf(os.Stderr, "  /          - Search/filter resources\n")
 		fmt.Fprintf(os.Stderr, "  ?          - Show help\n")
 		fmt.Fprintf(os.Stderr, "  q/Ctrl+C   - Quit\n")
@@ -163,6 +174,57 @@ func parseFlags() *CLIFlags {
 	}
 
 	return flags
+}
+
+// parseContexts parses contexts from various sources
+func parseContexts(flags *CLIFlags) ([]string, error) {
+	var contexts []string
+
+	// Parse from --context flag (supports comma-separated values)
+	if flags.context != "" {
+		if strings.Contains(flags.context, ",") {
+			// Multiple contexts specified
+			contexts = strings.Split(flags.context, ",")
+			for i, ctx := range contexts {
+				contexts[i] = strings.TrimSpace(ctx)
+			}
+		} else {
+			// Single context specified
+			contexts = []string{strings.TrimSpace(flags.context)}
+		}
+	}
+
+	// Parse from context file (appends to contexts from --context flag)
+	if flags.contextFile != "" {
+		file, err := os.Open(flags.contextFile)
+		if err != nil {
+			return nil, fmt.Errorf("failed to open context file: %w", err)
+		}
+		defer file.Close()
+
+		scanner := bufio.NewScanner(file)
+		for scanner.Scan() {
+			ctx := strings.TrimSpace(scanner.Text())
+			if ctx != "" && !strings.HasPrefix(ctx, "#") { // Skip empty lines and comments
+				contexts = append(contexts, ctx)
+			}
+		}
+		if err := scanner.Err(); err != nil {
+			return nil, fmt.Errorf("failed to read context file: %w", err)
+		}
+	}
+
+	// Remove duplicates
+	seen := make(map[string]bool)
+	var uniqueContexts []string
+	for _, ctx := range contexts {
+		if !seen[ctx] {
+			seen[ctx] = true
+			uniqueContexts = append(uniqueContexts, ctx)
+		}
+	}
+
+	return uniqueContexts, nil
 }
 
 func main() {
@@ -198,34 +260,68 @@ func main() {
 		log.Fatalf("Failed to load configuration: %v", err)
 	}
 
-	// Initialize Kubernetes client with additional options
-	k8sClient, err := k8s.NewClientWithOptions(config.KubeConfig, &k8s.ClientOptions{
-		Context:              flags.context,
-		Namespace:            config.CurrentNamespace,
-		User:                 flags.user,
-		Cluster:              flags.cluster,
-		ClientCertificate:    flags.clientCertificate,
-		ClientKey:            flags.clientKey,
-		CertificateAuthority: flags.certificateAuthority,
-		InsecureSkipVerify:   flags.insecureSkipVerify,
-		Token:                flags.token,
-		TokenFile:            flags.tokenFile,
-		Impersonate:          flags.asUser,
-		ImpersonateGroups:    flags.asGroup,
-		ImpersonateUID:       flags.asUID,
-		Timeout:              flags.timeout,
-		CacheDir:             flags.cacheDir,
-	})
-	if err != nil {
-		log.Fatalf("Failed to initialize Kubernetes client: %v", err)
-	}
-
 	// Initialize application state
 	state := core.NewState(config)
 
-	// Create the main application
-	app := ui.NewApp(ctx, k8sClient, state, config)
+	// Determine if we should use multi-context mode
+	contexts, err := parseContexts(flags)
+	if err != nil {
+		log.Fatalf("Failed to parse contexts: %v", err)
+	}
 
+	var multiClient *k8s.MultiContextClient
+	var singleClient *k8s.Client
+	isMultiContext := len(contexts) > 1
+
+	if isMultiContext {
+		// Multi-context mode
+		multiClient, err = k8s.NewMultiContextClient(contexts)
+		if err != nil {
+			log.Fatalf("Failed to initialize multi-context Kubernetes client: %v", err)
+		}
+
+		// Update state for multi-context mode
+		state.SetMultiContextMode(true)
+		state.SetCurrentContexts(contexts)
+
+		log.Printf("Initialized multi-context mode with contexts: %v", contexts)
+	} else {
+		// Single context mode (existing behavior)
+		// Use the first context if specified, otherwise use the default from config
+		contextToUse := config.CurrentContext
+		if len(contexts) == 1 {
+			contextToUse = contexts[0]
+		}
+
+		singleClient, err = k8s.NewClientWithOptions(config.KubeConfig, &k8s.ClientOptions{
+			Context:              contextToUse,
+			Namespace:            config.CurrentNamespace,
+			User:                 flags.user,
+			Cluster:              flags.cluster,
+			ClientCertificate:    flags.clientCertificate,
+			ClientKey:            flags.clientKey,
+			CertificateAuthority: flags.certificateAuthority,
+			InsecureSkipVerify:   flags.insecureSkipVerify,
+			Token:                flags.token,
+			TokenFile:            flags.tokenFile,
+			Impersonate:          flags.asUser,
+			ImpersonateGroups:    flags.asGroup,
+			ImpersonateUID:       flags.asUID,
+			Timeout:              flags.timeout,
+			CacheDir:             flags.cacheDir,
+		})
+		if err != nil {
+			log.Fatalf("Failed to initialize Kubernetes client: %v", err)
+		}
+	}
+
+	// Create the main application
+	var app *ui.App
+	if isMultiContext {
+		app = ui.NewAppWithMultiContext(ctx, multiClient, state, config)
+	} else {
+		app = ui.NewApp(ctx, singleClient, state, config)
+	}
 	// Create Bubble Tea program
 	p := tea.NewProgram(app, tea.WithAltScreen())
 

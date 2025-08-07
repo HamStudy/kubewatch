@@ -58,6 +58,10 @@ test: ## Run tests
 	@echo "Running tests..."
 	$(GOTEST) -v -race -coverprofile=coverage.out ./...
 
+test-ui: ## Run UI tests only
+	@echo "Running UI tests..."
+	$(GOTEST) -v ./internal/ui/...
+
 coverage: test ## Generate coverage report
 	@echo "Generating coverage report..."
 	@go tool cover -html=coverage.out -o coverage.html

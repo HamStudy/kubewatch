@@ -28,25 +28,22 @@ func NewNamespaceView(namespaces []v1.Namespace, currentNamespace string) *Names
 		currentNamespace: currentNamespace,
 	}
 
-	// Pre-select the current namespace
-	for i, ns := range namespaces {
-		if ns.Name == currentNamespace {
-			nv.selectedIndex = i
-			break
-		}
-	}
-
 	// Add "all" option at the beginning
 	allNs := v1.Namespace{}
 	allNs.Name = "all"
 	nv.namespaces = append([]v1.Namespace{allNs}, namespaces...)
 	nv.filteredItems = nv.namespaces
 
-	// Adjust selection if current namespace is "all" or empty
+	// Pre-select the current namespace
 	if currentNamespace == "" || currentNamespace == "all" {
 		nv.selectedIndex = 0
 	} else {
-		nv.selectedIndex++ // Adjust for the "all" option we added
+		for i, ns := range nv.namespaces {
+			if ns.Name == currentNamespace {
+				nv.selectedIndex = i
+				break
+			}
+		}
 	}
 
 	return nv
@@ -99,9 +96,17 @@ func (v *NamespaceView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "enter":
 			// Selection made - will be handled by parent
 			return v, nil
-		case "q", "n":
+		case "q":
 			// Cancel - will be handled by parent
 			return v, nil
+		case "n":
+			// Only treat 'n' as cancel when not filtering
+			if v.filter == "" {
+				return v, nil
+			}
+			// Otherwise, add it to the filter
+			v.filter += msg.String()
+			v.applyFilter()
 		default:
 			// Add to filter if it's a printable character
 			if len(msg.String()) == 1 && msg.String()[0] >= 32 && msg.String()[0] < 127 {

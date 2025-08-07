@@ -12,24 +12,28 @@ import (
 	"github.com/charmbracelet/bubbles/key"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	v1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/watch"
 )
 
 // KeyMap defines the key bindings
 type KeyMap struct {
-	Up       key.Binding
-	Down     key.Binding
-	Left     key.Binding
-	Right    key.Binding
-	Enter    key.Binding
-	Space    key.Binding
-	Tab      key.Binding
-	ShiftTab key.Binding
-	Delete   key.Binding
-	Logs     key.Binding
-	Help     key.Binding
-	Quit     key.Binding
-	Refresh  key.Binding
+	Up            key.Binding
+	Down          key.Binding
+	Left          key.Binding
+	Right         key.Binding
+	Enter         key.Binding
+	Space         key.Binding
+	Tab           key.Binding
+	ShiftTab      key.Binding
+	Delete        key.Binding
+	Logs          key.Binding
+	Help          key.Binding
+	Quit          key.Binding
+	Refresh       key.Binding
+	ContextSwitch key.Binding
+	SortToggle    key.Binding
 }
 
 // DefaultKeyMap returns the default key bindings
@@ -68,8 +72,8 @@ func DefaultKeyMap() KeyMap {
 			key.WithHelp("shift+tab", "prev resource"),
 		),
 		Delete: key.NewBinding(
-			key.WithKeys("d", "delete"),
-			key.WithHelp("d", "delete"),
+			key.WithKeys("delete", "D"),
+			key.WithHelp("Del/D", "delete"),
 		),
 		Logs: key.NewBinding(
 			key.WithKeys("l"),
@@ -86,6 +90,14 @@ func DefaultKeyMap() KeyMap {
 		Refresh: key.NewBinding(
 			key.WithKeys("r", "ctrl+r"),
 			key.WithHelp("r", "refresh"),
+		),
+		ContextSwitch: key.NewBinding(
+			key.WithKeys("c"),
+			key.WithHelp("c", "switch context"),
+		),
+		SortToggle: key.NewBinding(
+			key.WithKeys("s"),
+			key.WithHelp("s", "sort toggle"),
 		),
 	}
 }
@@ -107,12 +119,25 @@ type App struct {
 	config    *core.Config
 	keys      KeyMap
 
+	// Multi-context support
+	multiClient         *k8s.MultiContextClient
+	isMultiContext      bool
+	contextView         *views.ContextView
+	showContextSelector bool
+	activeContexts      []string
+
 	// Views
 	resourceView  *views.ResourceView
 	logView       *views.LogView
 	helpView      *views.HelpView
 	namespaceView *views.NamespaceView
 	confirmView   *views.ConfirmView
+	describeView  *views.DescribeView
+
+	// Screen mode system
+	currentMode  ScreenModeType
+	previousMode ScreenModeType
+	modes        map[ScreenModeType]ScreenMode
 
 	// UI state
 	width              int
@@ -130,16 +155,70 @@ type App struct {
 
 // NewApp creates a new application instance
 func NewApp(ctx context.Context, k8sClient *k8s.Client, state *core.State, config *core.Config) *App {
-	return &App{
-		ctx:          ctx,
-		k8sClient:    k8sClient,
-		state:        state,
-		config:       config,
-		keys:         DefaultKeyMap(),
-		resourceView: views.NewResourceView(state, k8sClient),
-		logView:      views.NewLogView(),
-		helpView:     views.NewHelpView(),
+	// Get current context for single-context mode
+	var activeContexts []string
+	if _, currentCtx, err := k8s.GetAvailableContexts(); err == nil && currentCtx != "" {
+		activeContexts = []string{currentCtx}
 	}
+
+	app := &App{
+		ctx:            ctx,
+		k8sClient:      k8sClient,
+		state:          state,
+		config:         config,
+		keys:           DefaultKeyMap(),
+		resourceView:   views.NewResourceView(state, k8sClient),
+		logView:        views.NewLogView(),
+		helpView:       views.NewHelpView(),
+		isMultiContext: false,
+		activeContexts: activeContexts,
+		currentMode:    ModeList,
+		previousMode:   ModeList,
+	}
+
+	// Initialize screen modes
+	app.modes = map[ScreenModeType]ScreenMode{
+		ModeList:              NewListMode(),
+		ModeLog:               NewLogMode(),
+		ModeDescribe:          NewDescribeMode(),
+		ModeHelp:              NewHelpMode(),
+		ModeContextSelector:   NewContextSelectorMode(),
+		ModeNamespaceSelector: NewNamespaceSelectorMode(),
+		ModeConfirmDialog:     NewConfirmDialogMode(),
+	}
+
+	return app
+}
+
+// NewAppWithMultiContext creates a new application instance with multi-context support
+func NewAppWithMultiContext(ctx context.Context, multiClient *k8s.MultiContextClient, state *core.State, config *core.Config) *App {
+	app := &App{
+		ctx:            ctx,
+		multiClient:    multiClient,
+		state:          state,
+		config:         config,
+		keys:           DefaultKeyMap(),
+		resourceView:   views.NewResourceViewWithMultiContext(state, multiClient),
+		logView:        views.NewLogView(),
+		helpView:       views.NewHelpView(),
+		isMultiContext: true,
+		activeContexts: state.CurrentContexts,
+		currentMode:    ModeList,
+		previousMode:   ModeList,
+	}
+
+	// Initialize screen modes
+	app.modes = map[ScreenModeType]ScreenMode{
+		ModeList:              NewListMode(),
+		ModeLog:               NewLogMode(),
+		ModeDescribe:          NewDescribeMode(),
+		ModeHelp:              NewHelpMode(),
+		ModeContextSelector:   NewContextSelectorMode(),
+		ModeNamespaceSelector: NewNamespaceSelectorMode(),
+		ModeConfirmDialog:     NewConfirmDialogMode(),
+	}
+
+	return app
 }
 
 // Init initializes the application
@@ -164,166 +243,56 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		)
 
 	case tea.KeyMsg:
-		// ESC key has highest priority - always go back/cancel
-		if msg.String() == "esc" {
-			// Close any open dialog or view
-			if a.showDeleteConfirm {
-				a.showDeleteConfirm = false
-				a.pendingDeleteName = ""
-				return a, nil
-			}
-			if a.showNamespacePopup {
-				a.showNamespacePopup = false
-				return a, nil
-			}
-			if a.state.ShowHelp {
-				a.state.ShowHelp = false
-				return a, nil
-			}
-			if a.state.ShowLogs {
-				a.state.ShowLogs = false
-				a.resourceView.SetCompactMode(false)
-				a.resourceView.SetSize(a.width, a.height) // Reset to full size
-				return a, a.logView.StopStreaming()
-			}
-			// If nothing is open, ESC does nothing (don't quit)
-			return a, nil
+		// Use the new mode system for key handling
+		currentMode := a.getCurrentMode()
+		handled, cmd := currentMode.HandleKey(msg, a)
+
+		if handled {
+			return a, cmd
 		}
 
-		// Handle delete confirmation
-		if a.showDeleteConfirm {
-			switch msg.String() {
-			case "enter", " ":
-				// Check if confirmed
-				if a.confirmView.IsConfirmed() {
-					// Proceed with deletion
-					a.showDeleteConfirm = false
-					return a, a.resourceView.DeleteSelected()
-				}
-				// Cancelled
-				a.showDeleteConfirm = false
-				a.pendingDeleteName = ""
-				return a, nil
-			case "q":
-				// Cancel deletion
-				a.showDeleteConfirm = false
-				a.pendingDeleteName = ""
-				return a, nil
-			default:
-				// Pass to confirm view
-				confirmModel, cmd := a.confirmView.Update(msg)
-				a.confirmView = confirmModel.(*views.ConfirmView)
-				return a, cmd
+		// If not handled by mode, let the appropriate view handle it
+		// This maintains compatibility with existing view-specific key handling
+		switch a.currentMode {
+		case ModeList:
+			// Pass unhandled keys to resource view
+			resourceModel, viewCmd := a.resourceView.Update(msg)
+			a.resourceView = resourceModel.(*views.ResourceView)
+			return a, viewCmd
+		case ModeContextSelector:
+			if a.contextView != nil {
+				ctxModel, viewCmd := a.contextView.Update(msg)
+				a.contextView = ctxModel.(*views.ContextView)
+				return a, viewCmd
 			}
-		}
-
-		// Handle namespace popup
-		if a.showNamespacePopup {
-			switch msg.String() {
-			case "enter":
-				// Apply the selected namespace
-				newNamespace := a.namespaceView.GetSelectedNamespace()
-				if newNamespace != a.state.CurrentNamespace {
-					a.state.CurrentNamespace = newNamespace
-					a.config.CurrentNamespace = newNamespace
-					// Refresh resources with new namespace
-					a.showNamespacePopup = false
-					return a, a.resourceView.RefreshResources()
-				}
-				a.showNamespacePopup = false
-				return a, nil
-			case "q", "n":
-				// Cancel namespace selection
-				a.showNamespacePopup = false
-				return a, nil
-			default:
-				// Pass to namespace view
-				nsModel, cmd := a.namespaceView.Update(msg)
+		case ModeNamespaceSelector:
+			if a.namespaceView != nil {
+				nsModel, viewCmd := a.namespaceView.Update(msg)
 				a.namespaceView = nsModel.(*views.NamespaceView)
-				return a, cmd
+				return a, viewCmd
 			}
-		}
+		case ModeConfirmDialog:
+			if a.confirmView != nil {
+				confirmModel, viewCmd := a.confirmView.Update(msg)
+				a.confirmView = confirmModel.(*views.ConfirmView)
 
-		// When logs are showing AND in search mode, skip ALL app-level key handling
-		if a.state.ShowLogs && a.logView.IsSearchMode() {
-			// Only let ESC work to cancel search
-			if msg.String() == "esc" {
-				// This will be handled by the log view to cancel search
-			}
-			// Skip all other app-level key processing when in search mode
-		} else if a.state.ShowLogs {
-			// When logs are showing but NOT in search mode
-			switch {
-			case key.Matches(msg, a.keys.Quit):
-				return a, tea.Quit
-			case key.Matches(msg, a.keys.Help):
-				a.state.ShowHelp = !a.state.ShowHelp
-				a.helpView.SetContext("logs")
-				return a, nil
-				// All other keys go to the log view (handled below)
-			}
-		} else { // Normal resource view key handling
-			switch {
-			case key.Matches(msg, a.keys.Quit):
-				return a, tea.Quit
-
-			case key.Matches(msg, a.keys.Help):
-				a.state.ShowHelp = !a.state.ShowHelp
-				a.helpView.SetContext("resource")
-				return a, nil
-
-			case msg.String() == "n":
-				// Open namespace selector (only when logs not showing)
-				return a, a.openNamespaceSelector()
-
-			case key.Matches(msg, a.keys.Tab):
-				// Switch resource types (only when logs not showing)
-				a.nextResourceType()
-				return a, a.resourceView.RefreshResources()
-
-			case key.Matches(msg, a.keys.ShiftTab):
-				// Switch resource types (only when logs not showing)
-				a.prevResourceType()
-				return a, a.resourceView.RefreshResources()
-
-			case key.Matches(msg, a.keys.Logs):
-				// Toggle log view
-				if !a.state.ShowLogs {
-					selectedName := a.resourceView.GetSelectedResourceName()
-					if selectedName != "" {
-						a.state.ShowLogs = true
-						a.resourceView.SetCompactMode(true)
-						return a, a.logView.StartStreaming(a.ctx, a.k8sClient, a.state, selectedName)
-					}
-				} else {
-					a.state.ShowLogs = false
-					a.resourceView.SetCompactMode(false)
-					a.resourceView.SetSize(a.width, a.height) // Reset to full size
-					return a, a.logView.StopStreaming()
+				// Check if the dialog was completed with 'y' or 'n'
+				if a.confirmView.IsCompleted() {
+					return a, a.handleConfirmDialogAction()
 				}
 
-			case key.Matches(msg, a.keys.Delete):
-				// Show delete confirmation (only when logs not showing)
-				selectedName := a.resourceView.GetSelectedResourceName()
-				if selectedName != "" {
-					a.pendingDeleteName = selectedName
-					resourceType := string(a.state.CurrentResourceType)
-					// Remove the 's' at the end for singular form
-					if strings.HasSuffix(resourceType, "s") {
-						resourceType = resourceType[:len(resourceType)-1]
-					}
-					message := fmt.Sprintf("Are you sure you want to delete %s '%s'?",
-						strings.ToLower(resourceType), selectedName)
-					a.confirmView = views.NewConfirmView("⚠️  Confirm Deletion", message)
-					a.confirmView.SetSize(a.width, a.height)
-					a.confirmView.SetConfirmText("Delete")
-					a.confirmView.SetCancelText("Cancel")
-					a.showDeleteConfirm = true
-					return a, nil
-				}
-
-			case key.Matches(msg, a.keys.Refresh):
-				return a, a.resourceView.RefreshResources()
+				return a, viewCmd
+			}
+		case ModeLog:
+			// Log view handles its own keys
+			logModel, viewCmd := a.logView.Update(msg)
+			a.logView = logModel.(*views.LogView)
+			return a, viewCmd
+		case ModeDescribe:
+			if a.describeView != nil {
+				describeModel, viewCmd := a.describeView.Update(msg)
+				a.describeView = describeModel.(*views.DescribeView)
+				return a, viewCmd
 			}
 		}
 
@@ -341,19 +310,33 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if a.confirmView != nil {
 			a.confirmView.SetSize(msg.Width, msg.Height)
 		}
+		if a.contextView != nil {
+			a.contextView.SetSize(msg.Width, msg.Height)
+		}
 		return a, nil
 
 	case deleteCompleteMsg:
 		// Resource deleted successfully, refresh the list
 		return a, a.resourceView.RefreshResources()
+
+	case views.ContextInfoMsg:
+		// Show context information
+		return a, a.showContextInfo(msg.ContextName)
+
+	case contextInfoDisplayMsg:
+		// For now, just log the context info (in a real app, you might show a popup)
+		// The context selector will remain open
+		return a, nil
 	}
 
-	// Update child views
-	if a.state.ShowHelp {
+	// Update child views based on current mode
+	switch a.currentMode {
+	case ModeHelp:
 		helpModel, cmd := a.helpView.Update(msg)
 		a.helpView = helpModel.(*views.HelpView)
 		cmds = append(cmds, cmd)
-	} else if a.state.ShowLogs {
+
+	case ModeLog:
 		// Split view: only pass keyboard events to the log view
 		// Resource view only gets non-keyboard messages (like refresh ticks)
 		switch msg.(type) {
@@ -372,8 +355,37 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.logView = logModel.(*views.LogView)
 			cmds = append(cmds, cmd)
 		}
-	} else {
-		// Full resource view
+
+	case ModeDescribe:
+		if a.describeView != nil {
+			describeModel, cmd := a.describeView.Update(msg)
+			a.describeView = describeModel.(*views.DescribeView)
+			cmds = append(cmds, cmd)
+		}
+
+	case ModeContextSelector:
+		if a.contextView != nil {
+			ctxModel, cmd := a.contextView.Update(msg)
+			a.contextView = ctxModel.(*views.ContextView)
+			cmds = append(cmds, cmd)
+		}
+
+	case ModeNamespaceSelector:
+		if a.namespaceView != nil {
+			nsModel, cmd := a.namespaceView.Update(msg)
+			a.namespaceView = nsModel.(*views.NamespaceView)
+			cmds = append(cmds, cmd)
+		}
+
+	case ModeConfirmDialog:
+		if a.confirmView != nil {
+			confirmModel, cmd := a.confirmView.Update(msg)
+			a.confirmView = confirmModel.(*views.ConfirmView)
+			cmds = append(cmds, cmd)
+		}
+
+	default:
+		// Default to resource view (list mode)
 		resourceModel, cmd := a.resourceView.Update(msg)
 		a.resourceView = resourceModel.(*views.ResourceView)
 		cmds = append(cmds, cmd)
@@ -388,21 +400,32 @@ func (a *App) View() string {
 		return "Initializing..."
 	}
 
-	// Show delete confirmation over everything if active
-	if a.showDeleteConfirm && a.confirmView != nil {
-		return a.confirmView.View()
-	}
+	// Render based on current mode
+	switch a.currentMode {
+	case ModeConfirmDialog:
+		if a.confirmView != nil {
+			return a.confirmView.View()
+		}
 
-	// Show namespace popup over everything if active
-	if a.showNamespacePopup && a.namespaceView != nil {
-		return a.namespaceView.View()
-	}
+	case ModeNamespaceSelector:
+		if a.namespaceView != nil {
+			return a.namespaceView.View()
+		}
 
-	if a.state.ShowHelp {
+	case ModeContextSelector:
+		if a.contextView != nil {
+			return a.contextView.View()
+		}
+
+	case ModeHelp:
 		return a.helpView.View()
-	}
 
-	if a.state.ShowLogs {
+	case ModeDescribe:
+		if a.describeView != nil {
+			return a.describeView.View()
+		}
+
+	case ModeLog:
 		// Split view - give more space to logs, keep resource view compact
 		minResourceHeight := 8 // Minimum height for resource view (header + 5-6 rows)
 		resourceHeight := minResourceHeight
@@ -435,6 +458,7 @@ func (a *App) View() string {
 		return lipgloss.JoinVertical(lipgloss.Left, topView, bottomView)
 	}
 
+	// Default to list mode (resource view)
 	return a.resourceView.View()
 }
 
@@ -553,6 +577,21 @@ func (a *App) startRefreshTimer() tea.Cmd {
 
 // openNamespaceSelector opens the namespace selection popup
 func (a *App) openNamespaceSelector() tea.Cmd {
+	// For testing or when k8s client is not available, use mock namespaces
+	if a.k8sClient == nil {
+		// Create namespace view with test namespaces
+		testNamespaces := []v1.Namespace{
+			{ObjectMeta: metav1.ObjectMeta{Name: "default"}},
+			{ObjectMeta: metav1.ObjectMeta{Name: "kube-system"}},
+			{ObjectMeta: metav1.ObjectMeta{Name: "test-namespace"}},
+		}
+		a.namespaceView = views.NewNamespaceView(testNamespaces, a.state.CurrentNamespace)
+		a.namespaceView.SetSize(a.width, a.height)
+		a.showNamespacePopup = true
+		a.setMode(ModeNamespaceSelector)
+		return nil
+	}
+
 	return func() tea.Msg {
 		ctx := context.Background()
 		namespaces, err := a.k8sClient.ListNamespaces(ctx)
@@ -565,11 +604,305 @@ func (a *App) openNamespaceSelector() tea.Cmd {
 		a.namespaceView = views.NewNamespaceView(namespaces, a.state.CurrentNamespace)
 		a.namespaceView.SetSize(a.width, a.height)
 		a.showNamespacePopup = true
+		a.setMode(ModeNamespaceSelector)
 
 		return nil
+	}
+}
+
+// openContextSelector opens the context selection popup
+func (a *App) openContextSelector() tea.Cmd {
+	// For testing or when k8s client is not available, use mock contexts
+	if a.k8sClient == nil && a.multiClient == nil {
+		// Create context view with test contexts
+		testContexts := []string{"test-context", "context-1", "context-2"}
+		a.contextView = views.NewContextView(testContexts, a.activeContexts)
+		a.contextView.SetSize(a.width, a.height)
+		a.showContextSelector = true
+		a.setMode(ModeContextSelector)
+		return nil
+	}
+
+	return func() tea.Msg {
+		// Get available contexts
+		contexts, _, err := k8s.GetAvailableContexts()
+		if err != nil {
+			return errMsg{err}
+		}
+
+		// Create context view with current selections
+		a.contextView = views.NewContextView(contexts, a.activeContexts)
+		a.contextView.SetSize(a.width, a.height)
+		a.showContextSelector = true
+		a.setMode(ModeContextSelector)
+
+		return nil
+	}
+}
+
+// getSelectedResourceContext returns the context of the currently selected resource in multi-context mode
+func (a *App) getSelectedResourceContext() string {
+	if !a.isMultiContext {
+		return ""
+	}
+
+	return a.resourceView.GetSelectedResourceContext()
+}
+
+// cycleSortColumn cycles through available sort columns or toggles sort direction
+func (a *App) cycleSortColumn() {
+	// Get available columns for current resource type
+	availableColumns := a.getAvailableSortColumns()
+
+	currentColumn := a.state.SortColumn
+	if currentColumn == "" {
+		currentColumn = "NAME"
+	}
+
+	// Find current column index
+	currentIndex := -1
+	for i, col := range availableColumns {
+		if col == currentColumn {
+			currentIndex = i
+			break
+		}
+	}
+
+	if currentIndex == -1 {
+		// Column not found, start with first column
+		a.state.SortColumn = availableColumns[0]
+		a.state.SortAscending = true
+	} else if currentIndex == len(availableColumns)-1 {
+		// Last column, toggle direction
+		a.state.SortAscending = !a.state.SortAscending
+	} else {
+		// Move to next column
+		a.state.SortColumn = availableColumns[currentIndex+1]
+		a.state.SortAscending = true
+	}
+}
+
+// getAvailableSortColumns returns the sortable columns for the current resource type
+func (a *App) getAvailableSortColumns() []string {
+	switch a.state.CurrentResourceType {
+	case core.ResourceTypePod:
+		if a.isMultiContext {
+			return []string{"CONTEXT", "NAME", "READY", "STATUS", "RESTARTS", "AGE"}
+		}
+		return []string{"NAME", "READY", "STATUS", "RESTARTS", "AGE"}
+	case core.ResourceTypeDeployment:
+		if a.isMultiContext {
+			return []string{"CONTEXT", "NAME", "READY", "UP-TO-DATE", "AVAILABLE", "AGE"}
+		}
+		return []string{"NAME", "READY", "UP-TO-DATE", "AVAILABLE", "AGE"}
+	case core.ResourceTypeService:
+		if a.isMultiContext {
+			return []string{"CONTEXT", "NAME", "TYPE", "CLUSTER-IP", "AGE"}
+		}
+		return []string{"NAME", "TYPE", "CLUSTER-IP", "AGE"}
+	default:
+		if a.isMultiContext {
+			return []string{"CONTEXT", "NAME", "AGE"}
+		}
+		return []string{"NAME", "AGE"}
+	}
+}
+
+// Mode management methods
+
+// setMode changes the current screen mode
+func (a *App) setMode(mode ScreenModeType) {
+	a.previousMode = a.currentMode
+	a.currentMode = mode
+
+	// Update legacy state flags for compatibility
+	switch mode {
+	case ModeHelp:
+		a.state.ShowHelp = true
+	case ModeLog:
+		a.state.ShowLogs = true
+	case ModeContextSelector:
+		a.showContextSelector = true
+	case ModeNamespaceSelector:
+		a.showNamespacePopup = true
+	case ModeConfirmDialog:
+		a.showDeleteConfirm = true
+	default:
+		// Clear all legacy flags when returning to list mode
+		a.state.ShowHelp = false
+		a.state.ShowLogs = false
+		a.showContextSelector = false
+		a.showNamespacePopup = false
+		a.showDeleteConfirm = false
+	}
+}
+
+// returnToPreviousMode returns to the previous screen mode
+func (a *App) returnToPreviousMode() {
+	a.setMode(a.previousMode)
+}
+
+// getCurrentMode returns the current screen mode handler
+func (a *App) getCurrentMode() ScreenMode {
+	if mode, exists := a.modes[a.currentMode]; exists {
+		return mode
+	}
+	return a.modes[ModeList] // fallback
+}
+
+// Mode-specific action methods
+
+// startDescribeView starts the describe view for a resource
+func (a *App) startDescribeView(resourceName string) tea.Cmd {
+	resourceType := string(a.state.CurrentResourceType)
+	namespace := a.state.CurrentNamespace
+	context := ""
+
+	if a.isMultiContext {
+		context = a.getSelectedResourceContext()
+	}
+
+	a.describeView = views.NewDescribeView(resourceType, resourceName, namespace, context)
+	a.describeView.SetSize(a.width, a.height)
+
+	// Use the appropriate client
+	if a.isMultiContext && context != "" {
+		if client, err := a.multiClient.GetClient(context); err == nil {
+			return a.describeView.LoadDescribeWithClient(a.ctx, client)
+		}
+	} else if a.k8sClient != nil {
+		return a.describeView.LoadDescribeWithClient(a.ctx, a.k8sClient)
+	}
+
+	// Fallback to placeholder content
+	return a.describeView.Init()
+}
+
+// showDeleteConfirmation shows the delete confirmation dialog
+func (a *App) showDeleteConfirmation(resourceName string) tea.Cmd {
+	a.pendingDeleteName = resourceName
+	resourceType := string(a.state.CurrentResourceType)
+
+	// Remove the 's' at the end for singular form
+	if strings.HasSuffix(resourceType, "s") {
+		resourceType = resourceType[:len(resourceType)-1]
+	}
+
+	message := fmt.Sprintf("Are you sure you want to delete %s '%s'?",
+		strings.ToLower(resourceType), resourceName)
+	a.confirmView = views.NewConfirmView("⚠️  Confirm Deletion", message)
+	a.confirmView.SetSize(a.width, a.height)
+	a.confirmView.SetConfirmText("Delete")
+	a.confirmView.SetCancelText("Cancel")
+
+	return nil
+}
+
+// applyContextSelection applies the selected contexts
+func (a *App) applyContextSelection() tea.Cmd {
+	if a.contextView == nil {
+		return nil
+	}
+	newContexts := a.contextView.GetSelectedContexts()
+	if len(newContexts) > 0 {
+		a.activeContexts = newContexts
+		a.state.SetCurrentContexts(newContexts)
+
+		if len(newContexts) == 1 {
+			// Single context mode - create a single client
+			singleClient, err := k8s.NewClientWithOptions("", &k8s.ClientOptions{
+				Context: newContexts[0],
+			})
+			if err == nil {
+				a.k8sClient = singleClient
+				a.multiClient = nil
+				a.isMultiContext = false
+				// Update resource view with single client
+				a.resourceView = views.NewResourceView(a.state, singleClient)
+				a.resourceView.SetSize(a.width, a.height)
+			}
+		} else {
+			// Multi-context mode - create multi-client
+			multiClient, err := k8s.NewMultiContextClient(newContexts)
+			if err == nil {
+				a.multiClient = multiClient
+				a.k8sClient = nil
+				a.isMultiContext = true
+				// Update resource view with multi-client
+				a.resourceView = views.NewResourceViewWithMultiContext(a.state, multiClient)
+				a.resourceView.SetSize(a.width, a.height)
+			}
+		}
+
+		// Refresh resources with new contexts
+		a.setMode(ModeList)
+		return a.resourceView.RefreshResources()
+	}
+	a.setMode(ModeList)
+	return nil
+}
+
+// applyNamespaceSelection applies the selected namespace
+func (a *App) applyNamespaceSelection() tea.Cmd {
+	newNamespace := a.namespaceView.GetSelectedNamespace()
+	if newNamespace != a.state.CurrentNamespace {
+		a.state.CurrentNamespace = newNamespace
+		a.config.CurrentNamespace = newNamespace
+		// Refresh resources with new namespace
+		a.setMode(ModeList)
+		return a.resourceView.RefreshResources()
+	}
+	a.setMode(ModeList)
+	return nil
+}
+
+// handleConfirmDialogAction handles the confirm dialog action
+func (a *App) handleConfirmDialogAction() tea.Cmd {
+	if a.confirmView.IsConfirmed() {
+		// Proceed with deletion
+		a.setMode(ModeList)
+		return a.resourceView.DeleteSelected()
+	}
+	// Cancelled
+	a.setMode(ModeList)
+	a.pendingDeleteName = ""
+	return nil
+}
+
+// showContextInfo displays detailed information about a context
+func (a *App) showContextInfo(contextName string) tea.Cmd {
+	return func() tea.Msg {
+		// Get context information
+		contexts, currentCtx, err := k8s.GetAvailableContexts()
+		if err != nil {
+			return errMsg{err}
+		}
+
+		// Find the context details
+		info := fmt.Sprintf("Context: %s\n", contextName)
+		if contextName == currentCtx {
+			info += "Status: Current context\n"
+		} else {
+			info += "Status: Available\n"
+		}
+
+		// Add more context details here if available
+		info += fmt.Sprintf("Total contexts available: %d\n", len(contexts))
+
+		// For now, just show a simple info message
+		// In a real implementation, you might want to create a dedicated info view
+		return contextInfoDisplayMsg{
+			contextName: contextName,
+			info:        info,
+		}
 	}
 }
 
 // Message types
 type errMsg struct{ err error }
 type deleteCompleteMsg struct{ name string }
+type contextSelectionMsg struct{ contexts []string }
+type contextInfoDisplayMsg struct {
+	contextName string
+	info        string
+}

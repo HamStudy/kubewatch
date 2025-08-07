@@ -32,7 +32,12 @@ type State struct {
 	SelectedIndex       int
 	ScrollOffset        int
 
-	// Resources cache
+	// Multi-context support
+	CurrentContexts  []string        // Active contexts
+	ContextFilter    map[string]bool // Which contexts to show
+	MultiContextMode bool            // Whether in multi-context mode
+
+	// Resources cache (single context)
 	Pods         []v1.Pod
 	Deployments  []appsv1.Deployment
 	StatefulSets []appsv1.StatefulSet
@@ -40,6 +45,15 @@ type State struct {
 	Ingresses    []networkingv1.Ingress
 	ConfigMaps   []v1.ConfigMap
 	Secrets      []v1.Secret
+
+	// Multi-context resources cache
+	PodsByContext         map[string][]v1.Pod
+	DeploymentsByContext  map[string][]appsv1.Deployment
+	StatefulSetsByContext map[string][]appsv1.StatefulSet
+	ServicesByContext     map[string][]v1.Service
+	IngressesByContext    map[string][]networkingv1.Ingress
+	ConfigMapsByContext   map[string][]v1.ConfigMap
+	SecretsByContext      map[string][]v1.Secret
 
 	// UI state
 	ShowHelp      bool
@@ -83,7 +97,20 @@ func NewState(config *Config) *State {
 		CurrentNamespace:    config.CurrentNamespace,
 		SelectedItems:       make(map[string]bool),
 		config:              config,
+		SortColumn:          "NAME", // Default sort by name
 		SortAscending:       true,
+
+		// Initialize multi-context fields
+		CurrentContexts:       []string{},
+		ContextFilter:         make(map[string]bool),
+		MultiContextMode:      false,
+		PodsByContext:         make(map[string][]v1.Pod),
+		DeploymentsByContext:  make(map[string][]appsv1.Deployment),
+		StatefulSetsByContext: make(map[string][]appsv1.StatefulSet),
+		ServicesByContext:     make(map[string][]v1.Service),
+		IngressesByContext:    make(map[string][]networkingv1.Ingress),
+		ConfigMapsByContext:   make(map[string][]v1.ConfigMap),
+		SecretsByContext:      make(map[string][]v1.Secret),
 	}
 }
 
@@ -179,4 +206,113 @@ func (s *State) UpdateSecrets(secrets []v1.Secret) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.Secrets = secrets
+}
+
+// SetMultiContextMode enables or disables multi-context mode
+func (s *State) SetMultiContextMode(enabled bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.MultiContextMode = enabled
+}
+
+// SetCurrentContexts updates the active contexts
+func (s *State) SetCurrentContexts(contexts []string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.CurrentContexts = contexts
+
+	// Update context filter
+	s.ContextFilter = make(map[string]bool)
+	for _, ctx := range contexts {
+		s.ContextFilter[ctx] = true
+	}
+}
+
+// UpdatePodsByContext updates pods for a specific context
+func (s *State) UpdatePodsByContext(context string, pods []v1.Pod) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.PodsByContext[context] = pods
+}
+
+// UpdateDeploymentsByContext updates deployments for a specific context
+func (s *State) UpdateDeploymentsByContext(context string, deployments []appsv1.Deployment) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.DeploymentsByContext[context] = deployments
+}
+
+// UpdateStatefulSetsByContext updates statefulsets for a specific context
+func (s *State) UpdateStatefulSetsByContext(context string, statefulsets []appsv1.StatefulSet) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.StatefulSetsByContext[context] = statefulsets
+}
+
+// UpdateServicesByContext updates services for a specific context
+func (s *State) UpdateServicesByContext(context string, services []v1.Service) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.ServicesByContext[context] = services
+}
+
+// UpdateIngressesByContext updates ingresses for a specific context
+func (s *State) UpdateIngressesByContext(context string, ingresses []networkingv1.Ingress) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.IngressesByContext[context] = ingresses
+}
+
+// UpdateConfigMapsByContext updates configmaps for a specific context
+func (s *State) UpdateConfigMapsByContext(context string, configmaps []v1.ConfigMap) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.ConfigMapsByContext[context] = configmaps
+}
+
+// UpdateSecretsByContext updates secrets for a specific context
+func (s *State) UpdateSecretsByContext(context string, secrets []v1.Secret) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.SecretsByContext[context] = secrets
+}
+
+// GetAggregatedPods returns pods from all active contexts
+func (s *State) GetAggregatedPods() []v1.Pod {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if !s.MultiContextMode {
+		return s.Pods
+	}
+
+	var allPods []v1.Pod
+	for _, context := range s.CurrentContexts {
+		if s.ContextFilter[context] {
+			if pods, ok := s.PodsByContext[context]; ok {
+				allPods = append(allPods, pods...)
+			}
+		}
+	}
+	return allPods
+}
+
+// GetAggregatedDeployments returns deployments from all active contexts
+func (s *State) GetAggregatedDeployments() []appsv1.Deployment {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if !s.MultiContextMode {
+		return s.Deployments
+	}
+
+	var allDeployments []appsv1.Deployment
+	for _, context := range s.CurrentContexts {
+		if s.ContextFilter[context] {
+			if deployments, ok := s.DeploymentsByContext[context]; ok {
+				allDeployments = append(allDeployments, deployments...)
+			}
+		}
+	}
+	return allDeployments
 }

@@ -64,6 +64,12 @@ kubewatch
 # Specify namespace
 kubewatch --namespace production
 
+# Use a specific context
+kubewatch --context production
+
+# Use multiple contexts (multi-context mode)
+kubewatch --context prod,staging,dev
+
 # Custom refresh interval (in seconds)
 kubewatch --refresh-interval 5
 
@@ -109,9 +115,11 @@ kubewatch --kubeconfig ~/.kube/other-config
 kubewatch [flags]
 
 Flags:
+  --context string           Kubernetes context(s) to use. Single: 'prod' or Multiple: 'prod,staging,dev'
   --namespace string         Kubernetes namespace (default: from current context)
   --kubeconfig string        Path to kubeconfig file (default: $HOME/.kube/config)
   --refresh-interval int     Auto-refresh interval in seconds (default: 2)
+  --context-file string      File containing list of contexts (one per line)
   --help                     Show help message
 ```
 
@@ -174,7 +182,7 @@ go test ./internal/k8s
 ### Planned Features
 - [ ] Search/filter in resource view
 - [ ] Multi-selection for bulk operations
-- [ ] Context switching (multiple clusters)
+- [x] Context switching (multiple clusters) - Use `--context prod,staging,dev`
 - [ ] Column configuration (hide/show)
 - [ ] Aggregated logs for deployments
 - [ ] Persistent preferences

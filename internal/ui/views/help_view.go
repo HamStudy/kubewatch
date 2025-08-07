@@ -26,6 +26,12 @@ func (v *HelpView) SetContext(context string) {
 	v.contextMode = context
 }
 
+// SetModeHelp sets help content from a screen mode
+func (v *HelpView) SetModeHelp(mode interface{}) {
+	// This will be used to auto-generate help from mode key bindings
+	// For now, we'll keep the existing manual help
+}
+
 // Init initializes the view
 func (v *HelpView) Init() tea.Cmd {
 	return nil
@@ -81,12 +87,14 @@ func (v *HelpView) renderResourceHelp() string {
 	help.WriteString(keyStyle.Render("Tab") + descStyle.Render("    Next resource type") + "\n")
 	help.WriteString(keyStyle.Render("S-Tab") + descStyle.Render("  Previous resource type") + "\n")
 	help.WriteString(keyStyle.Render("n") + descStyle.Render("      Change namespace") + "\n")
+	help.WriteString(keyStyle.Render("c") + descStyle.Render("      Switch contexts (multi-context mode)") + "\n")
 
 	help.WriteString(sectionStyle.Render("Actions"))
 	help.WriteString("\n")
 	help.WriteString(keyStyle.Render("Enter/l") + descStyle.Render(" View logs") + "\n")
-	help.WriteString(keyStyle.Render("d") + descStyle.Render("       Delete selected") + "\n")
+	help.WriteString(keyStyle.Render("Del/D") + descStyle.Render("   Delete selected") + "\n")
 	help.WriteString(keyStyle.Render("r") + descStyle.Render("       Manual refresh") + "\n")
+	help.WriteString(keyStyle.Render("s") + descStyle.Render("       Cycle sort column/direction") + "\n")
 	help.WriteString(keyStyle.Render("u") + descStyle.Render("       Toggle word wrap") + "\n")
 
 	help.WriteString(sectionStyle.Render("General"))
