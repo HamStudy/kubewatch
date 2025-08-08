@@ -113,6 +113,14 @@ func getIngressHosts(ingress *networkingv1.Ingress) string {
 	if len(hosts) == 0 {
 		return "*"
 	}
+
+	// Match kubectl format: show first few hosts then "+ X more..."
+	if len(hosts) > 4 {
+		// Show first 3 hosts and indicate how many more
+		moreCount := len(hosts) - 3
+		return fmt.Sprintf("%s + %d more...", strings.Join(hosts[:3], ","), moreCount)
+	}
+
 	return strings.Join(hosts, ",")
 }
 

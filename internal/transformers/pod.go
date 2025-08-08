@@ -2,6 +2,7 @@ package transformers
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -9,6 +10,7 @@ import (
 	"github.com/HamStudy/kubewatch/internal/k8s"
 	"github.com/HamStudy/kubewatch/internal/template"
 	v1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 )
 
 // PodTransformer handles Pod resource transformation
@@ -209,59 +211,55 @@ func (t *PodTransformer) TransformToRow(resource interface{}, showNamespace bool
 
 	// CPU column
 	cpu := "-"
+	var cpuMillicores int64
 	if t.metricsProvider != nil {
 		if metrics, err := t.metricsProvider.GetPodMetrics(pod.Namespace); err == nil {
-			if podMetrics, ok := metrics[pod.Name]; ok {
-				cpu = podMetrics.CPU
+			if podMetrics, ok := metrics[pod.Name]; ok && podMetrics.CPU != "" && podMetrics.CPU != "-" {
+				// Parse the CPU value (it comes as a string like "100m" or "1.5")
+				cpuMillicores = parseCPUToMillicores(podMetrics.CPU)
+
+				// Get total CPU requests from containers
+				var totalRequestMillicores int64
+				for _, container := range pod.Spec.Containers {
+					if container.Resources.Requests != nil {
+						if cpuReq, ok := container.Resources.Requests[v1.ResourceCPU]; ok {
+							totalRequestMillicores += cpuReq.MilliValue()
+						}
+					}
+				}
+
+				// Format CPU with request-based coloring
+				cpu = formatCPU(cpuMillicores, totalRequestMillicores, templateEngine)
 			}
 		}
 	}
-
-	if templateEngine != nil && cpu != "-" {
-		data := map[string]interface{}{
-			"Metrics": map[string]interface{}{
-				"CPU": cpu,
-			},
-			"Spec": map[string]interface{}{
-				"Containers": pod.Spec.Containers,
-			},
-		}
-		if formatted, err := templateEngine.Execute("{{ . | cpu }}", data); err == nil {
-			row = append(row, formatted)
-		} else {
-			row = append(row, cpu)
-		}
-	} else {
-		row = append(row, cpu)
-	}
+	row = append(row, cpu)
 
 	// MEMORY column
 	memory := "-"
+	var memoryBytes int64
 	if t.metricsProvider != nil {
 		if metrics, err := t.metricsProvider.GetPodMetrics(pod.Namespace); err == nil {
-			if podMetrics, ok := metrics[pod.Name]; ok {
-				memory = podMetrics.Memory
+			if podMetrics, ok := metrics[pod.Name]; ok && podMetrics.Memory != "" && podMetrics.Memory != "-" {
+				// Parse the memory value (it comes as a string like "128Mi" or "1Gi")
+				memoryBytes = parseMemoryToBytes(podMetrics.Memory)
+
+				// Get total memory requests from containers
+				var totalRequestBytes int64
+				for _, container := range pod.Spec.Containers {
+					if container.Resources.Requests != nil {
+						if memReq, ok := container.Resources.Requests[v1.ResourceMemory]; ok {
+							totalRequestBytes += memReq.Value()
+						}
+					}
+				}
+
+				// Format memory with request-based coloring
+				memory = formatMemory(memoryBytes, totalRequestBytes, templateEngine)
 			}
 		}
 	}
-
-	if templateEngine != nil && memory != "-" {
-		data := map[string]interface{}{
-			"Metrics": map[string]interface{}{
-				"Memory": memory,
-			},
-			"Spec": map[string]interface{}{
-				"Containers": pod.Spec.Containers,
-			},
-		}
-		if formatted, err := templateEngine.Execute("{{ . | memory }}", data); err == nil {
-			row = append(row, formatted)
-		} else {
-			row = append(row, memory)
-		}
-	} else {
-		row = append(row, memory)
-	}
+	row = append(row, memory)
 
 	// IP column
 	ip := pod.Status.PodIP
@@ -278,6 +276,155 @@ func (t *PodTransformer) TransformToRow(resource interface{}, showNamespace bool
 	row = append(row, node)
 
 	return row, identity, nil
+}
+
+// parseCPUToMillicores parses a CPU string to millicores
+func parseCPUToMillicores(cpu string) int64 {
+	if cpu == "" || cpu == "-" {
+		return 0
+	}
+
+	// Handle millicores format (e.g., "100m")
+	if strings.HasSuffix(cpu, "m") {
+		val, err := strconv.ParseInt(strings.TrimSuffix(cpu, "m"), 10, 64)
+		if err == nil {
+			return val
+		}
+	}
+
+	// Handle cores format (e.g., "1.5")
+	if val, err := strconv.ParseFloat(cpu, 64); err == nil {
+		return int64(val * 1000)
+	}
+
+	// Try parsing as Kubernetes quantity
+	if quantity, err := resource.ParseQuantity(cpu); err == nil {
+		return quantity.MilliValue()
+	}
+
+	return 0
+}
+
+// parseMemoryToBytes parses a memory string to bytes
+func parseMemoryToBytes(memory string) int64 {
+	if memory == "" || memory == "-" {
+		return 0
+	}
+
+	// Try parsing as Kubernetes quantity
+	if quantity, err := resource.ParseQuantity(memory); err == nil {
+		return quantity.Value()
+	}
+
+	return 0
+}
+
+// formatCPU formats CPU value with request-based coloring
+func formatCPU(millicores int64, requestMillicores int64, templateEngine *template.Engine) string {
+	if millicores == 0 {
+		return "-"
+	}
+
+	// Format the value
+	var formatted string
+	if millicores < 1000 {
+		// Show as millicores for values < 1 core
+		formatted = fmt.Sprintf("%dm", millicores)
+	} else {
+		// Show as cores for values >= 1 core
+		cores := float64(millicores) / 1000.0
+		// Use one decimal place for cleaner display
+		if cores == float64(int(cores)) {
+			formatted = fmt.Sprintf("%.0f", cores)
+		} else {
+			formatted = fmt.Sprintf("%.1f", cores)
+		}
+	}
+
+	// Apply coloring based on percentage of requests if template engine is available
+	if templateEngine != nil && requestMillicores > 0 {
+		percentage := (millicores * 100) / requestMillicores
+
+		var styled string
+		var err error
+		if percentage > 100 {
+			// Over 100%: red background, white text, underlined
+			styled, err = templateEngine.Execute(`{{ style "red" "white" "underline" . }}`, formatted)
+		} else if percentage >= 90 {
+			// 90-100%: red text
+			styled, err = templateEngine.Execute(`{{ style "" "red" "" . }}`, formatted)
+		} else if percentage >= 70 {
+			// 70-90%: yellow text
+			styled, err = templateEngine.Execute(`{{ style "" "yellow" "" . }}`, formatted)
+		} else {
+			// <70%: green text
+			styled, err = templateEngine.Execute(`{{ style "" "green" "" . }}`, formatted)
+		}
+
+		if err == nil && styled != "" {
+			formatted = styled
+		}
+	}
+	return formatted
+}
+
+// formatMemory formats memory value with request-based coloring
+func formatMemory(bytes int64, requestBytes int64, templateEngine *template.Engine) string {
+	if bytes == 0 {
+		return "-"
+	}
+
+	// Format using Kubernetes-style units
+	const (
+		Ki = 1024
+		Mi = 1024 * Ki
+		Gi = 1024 * Mi
+	)
+
+	var formatted string
+	if bytes >= Gi {
+		gb := float64(bytes) / float64(Gi)
+		// Show fractional GB if significant
+		if gb < 10 && (bytes%Gi) >= 100*Mi {
+			formatted = fmt.Sprintf("%.1fGi", gb)
+		} else {
+			formatted = fmt.Sprintf("%.0fGi", gb)
+		}
+	} else if bytes >= Mi {
+		mb := bytes / Mi
+		formatted = fmt.Sprintf("%dMi", mb)
+	} else if bytes >= Ki {
+		kb := bytes / Ki
+		formatted = fmt.Sprintf("%dKi", kb)
+	} else {
+		formatted = fmt.Sprintf("%d", bytes)
+	}
+
+	// Apply coloring based on percentage of requests if template engine is available
+	if templateEngine != nil && requestBytes > 0 {
+		percentage := (bytes * 100) / requestBytes
+
+		var styled string
+		var err error
+		if percentage > 100 {
+			// Over 100%: red background, white text, underlined
+			styled, err = templateEngine.Execute(`{{ style "red" "white" "underline" . }}`, formatted)
+		} else if percentage >= 90 {
+			// 90-100%: red text
+			styled, err = templateEngine.Execute(`{{ style "" "red" "" . }}`, formatted)
+		} else if percentage >= 70 {
+			// 70-90%: yellow text
+			styled, err = templateEngine.Execute(`{{ style "" "yellow" "" . }}`, formatted)
+		} else {
+			// <70%: green text
+			styled, err = templateEngine.Execute(`{{ style "" "green" "" . }}`, formatted)
+		}
+
+		if err == nil && styled != "" {
+			formatted = styled
+		}
+	}
+	return formatted
 }
 
 // GetSortValue returns the value to use for sorting on the given column
@@ -318,6 +465,26 @@ func (t *PodTransformer) GetSortValue(resource interface{}, column string) inter
 			restartCount += cs.RestartCount
 		}
 		return restartCount
+	case "CPU":
+		// Sort by actual CPU usage if metrics are available
+		if t.metricsProvider != nil {
+			if metrics, err := t.metricsProvider.GetPodMetrics(pod.Namespace); err == nil {
+				if podMetrics, ok := metrics[pod.Name]; ok && podMetrics.CPU != "" && podMetrics.CPU != "-" {
+					return parseCPUToMillicores(podMetrics.CPU)
+				}
+			}
+		}
+		return int64(0)
+	case "MEMORY":
+		// Sort by actual memory usage if metrics are available
+		if t.metricsProvider != nil {
+			if metrics, err := t.metricsProvider.GetPodMetrics(pod.Namespace); err == nil {
+				if podMetrics, ok := metrics[pod.Name]; ok && podMetrics.Memory != "" && podMetrics.Memory != "-" {
+					return parseMemoryToBytes(podMetrics.Memory)
+				}
+			}
+		}
+		return int64(0)
 	default:
 		return ""
 	}

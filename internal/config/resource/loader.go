@@ -1,20 +1,15 @@
 package resource
 
 import (
-	"embed"
 	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
 
+	"github.com/HamStudy/kubewatch/configs/resources"
 	"gopkg.in/yaml.v3"
 )
-
-// embeddedResources contains all embedded resource definitions
-//
-//go:embed all:embedded
-var embeddedResources embed.FS
 
 // Loader handles loading resource definitions from various sources
 type Loader struct {
@@ -30,8 +25,14 @@ func NewLoader() *Loader {
 
 // LoadEmbedded loads all embedded resource definitions
 func (l *Loader) LoadEmbedded() error {
+	// Get the embedded filesystem
+	embeddedFS, err := resources.GetFS()
+	if err != nil {
+		return fmt.Errorf("failed to get embedded filesystem: %w", err)
+	}
+
 	// Walk through the embedded filesystem
-	err := fs.WalkDir(embeddedResources, "embedded", func(path string, d fs.DirEntry, err error) error {
+	err = fs.WalkDir(embeddedFS, ".", func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -47,7 +48,7 @@ func (l *Loader) LoadEmbedded() error {
 		}
 
 		// Read the file
-		data, err := embeddedResources.ReadFile(path)
+		data, err := fs.ReadFile(embeddedFS, path)
 		if err != nil {
 			return fmt.Errorf("failed to read embedded file %s: %w", path, err)
 		}

@@ -2,6 +2,7 @@ package transformers
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/HamStudy/kubewatch/internal/components/selection"
@@ -24,7 +25,7 @@ func (t *ServiceTransformer) GetResourceType() string {
 
 // GetHeaders returns column headers for Services
 func (t *ServiceTransformer) GetHeaders(showNamespace bool, multiContext bool) []string {
-	headers := []string{"NAME", "TYPE", "CLUSTER-IP", "EXTERNAL-IP", "PORT(S)", "AGE"}
+	headers := []string{"NAME", "TYPE", "CLUSTER-IP", "EXTERNAL-IP", "PORT(S)", "AGE", "SELECTOR"}
 
 	if showNamespace {
 		headers = append([]string{"NAMESPACE"}, headers...)
@@ -52,33 +53,36 @@ func (t *ServiceTransformer) TransformToRow(resource interface{}, showNamespace 
 		Context:   "", // Will be set by caller if needed
 	}
 
-	// Use template engine to format the row
-	data := map[string]interface{}{
-		"Name":       service.Name,
-		"Namespace":  service.Namespace,
-		"Type":       string(service.Spec.Type),
-		"ClusterIP":  service.Spec.ClusterIP,
-		"ExternalIP": getExternalIP(service),
-		"Ports":      formatPorts(service.Spec.Ports),
-		"Age":        service.CreationTimestamp.Time,
-		"Service":    service,
+	// If template engine is provided, try to use it
+	if templateEngine != nil {
+		// Use template engine to format the row
+		data := map[string]interface{}{
+			"Name":       service.Name,
+			"Namespace":  service.Namespace,
+			"Type":       string(service.Spec.Type),
+			"ClusterIP":  service.Spec.ClusterIP,
+			"ExternalIP": getExternalIP(service),
+			"Ports":      formatPorts(service.Spec.Ports),
+			"Age":        service.CreationTimestamp.Time,
+			"Service":    service,
+		}
+
+		// Get template for service row
+		templateName := "service_row"
+		if showNamespace {
+			templateName = "service_row_with_namespace"
+		}
+
+		result, err := templateEngine.Execute(templateName, data)
+		if err == nil {
+			// Split template result into columns
+			columns := strings.Split(strings.TrimSpace(result), "\t")
+			return columns, identity, nil
+		}
 	}
 
-	// Get template for service row
-	templateName := "service_row"
-	if showNamespace {
-		templateName = "service_row_with_namespace"
-	}
-
-	result, err := templateEngine.Execute(templateName, data)
-	if err != nil {
-		// Fallback to basic formatting if template fails
-		return t.formatBasicRow(service, showNamespace), identity, nil
-	}
-
-	// Split template result into columns
-	columns := strings.Split(strings.TrimSpace(result), "\t")
-	return columns, identity, nil
+	// Fallback to basic formatting if template is nil or fails
+	return t.formatBasicRow(service, showNamespace), identity, nil
 }
 
 // GetSortValue returns the value for sorting on a given column
@@ -103,6 +107,8 @@ func (t *ServiceTransformer) GetSortValue(resource interface{}, column string) i
 		return formatPorts(service.Spec.Ports)
 	case "AGE":
 		return service.CreationTimestamp.Time
+	case "SELECTOR":
+		return formatSelector(service.Spec.Selector)
 	default:
 		return service.Name
 	}
@@ -119,6 +125,7 @@ func (t *ServiceTransformer) formatBasicRow(service *corev1.Service, showNamespa
 		getExternalIP(service),
 		formatPorts(service.Spec.Ports),
 		age,
+		formatSelector(service.Spec.Selector),
 	}
 
 	if showNamespace {
@@ -199,9 +206,35 @@ func formatPorts(ports []corev1.ServicePort) string {
 		}
 		if port.Protocol != corev1.ProtocolTCP {
 			portStr += "/" + string(port.Protocol)
+		} else {
+			// Always add /TCP to match kubectl output
+			portStr += "/TCP"
 		}
 		portStrings = append(portStrings, portStr)
 	}
 
 	return strings.Join(portStrings, ",")
+}
+
+// formatSelector formats the service selector labels
+func formatSelector(selector map[string]string) string {
+	if len(selector) == 0 {
+		return "<none>"
+	}
+
+	var selectors []string
+	for key, value := range selector {
+		selectors = append(selectors, fmt.Sprintf("%s=%s", key, value))
+	}
+
+	// Sort for consistent output
+	sort.Strings(selectors)
+
+	// If there are many selectors, truncate with ellipsis
+	if len(selectors) > 2 {
+		// Show first two selectors and indicate there are more
+		return strings.Join(selectors[:2], ",") + ",..."
+	}
+
+	return strings.Join(selectors, ",")
 }

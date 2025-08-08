@@ -182,24 +182,46 @@ func (e *Engine) gradientFunc(value, min, max float64, colors ...string) string 
 	return e.colorFunc(colors[colorIndex], fmt.Sprintf("%.0f", value))
 }
 
-func (e *Engine) styleFunc(styles ...string) func(string) string {
-	return func(text string) string {
-		style := lipgloss.NewStyle()
-		for _, s := range styles {
-			switch s {
+// styleFunc applies background color, text color, and decorations to text
+// Syntax: style "bgColor" "textColor" "decorations" "text"
+// Example: style "red" "white" "underline" "100%"
+// Decorations can be comma-separated: "bold,underline,italic"
+func (e *Engine) styleFunc(bgColor, textColor, decorations, text string) string {
+	// Return empty string if text is empty
+	if text == "" {
+		return ""
+	}
+
+	style := lipgloss.NewStyle()
+
+	// Apply background color if provided
+	if bgColor != "" {
+		style = style.Background(lipgloss.Color(bgColor))
+	}
+
+	// Apply text color if provided
+	if textColor != "" {
+		style = style.Foreground(lipgloss.Color(textColor))
+	}
+
+	// Apply decorations if provided
+	if decorations != "" {
+		// Split decorations by comma to support multiple decorations
+		decorationList := strings.Split(decorations, ",")
+		for _, decoration := range decorationList {
+			decoration = strings.TrimSpace(decoration)
+			switch decoration {
 			case "bold":
 				style = style.Bold(true)
 			case "italic":
 				style = style.Italic(true)
 			case "underline":
 				style = style.Underline(true)
-			default:
-				// Assume it's a color
-				style = style.Foreground(lipgloss.Color(s))
 			}
 		}
-		return style.Render(text)
 	}
+
+	return style.Render(text)
 }
 
 func (e *Engine) bgFunc(color, text string) string {
